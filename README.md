@@ -1,30 +1,118 @@
-# Sedar (Chessenger 0.1)
+# Chessenger 0.2
 
-Sedar is a console chess program written by Dariusz Domagała in 2002 in C (Borland C++ Builder era).
-It is published here as version 0.1 of Chessenger, its predecessor. **It shares no code with Chessenger.**
-Sedar was written entirely by the author, by hand. Chessenger (0.2 and later) is a separate program, started from
-scratch in 2025 by AI coding assistants under the author's direction.
+Chessenger is a UCI chess engine in C99, written by AI coding assistants under the direction of Dariusz Domagała
+(see [How Chessenger is made](#how-chessenger-is-made)).
 
-- Code date: 2002-07-05
-- Strength: not measured. Sedar does not speak UCI; it plays in the console (type moves such as `e2e4`).
-- The source is published as written in 2002, with Polish identifiers and messages. The only change is that all
-  comments were removed.
+- Version: 0.2 (code date 2026-08-09)
+- Strength: not measured
+- What is new: First Chessenger: bitboards, alpha-beta with quiescence search, transposition table, UCI.
+
+## How Chessenger is made
+
+Chessenger is the work of one author and AI coding assistants. This section says plainly who did what.
+
+The C code was written by AI models: about 99% of the work was done with Anthropic's Claude models (Claude chat
+in 2025, Claude Code from 2026), about 1% with Goose and OpenAI's GPT models.
+
+The author's part:
+
+- deciding what the engine should become: which ideas to try, in what order, and which open-source engines to study;
+- setting the rules the AI works by: every statement about the code checked against the code or a measurement,
+  and no change kept without the author's decision;
+- setting the test conditions and reading the results: since August 2026, changes to search and evaluation have been
+  played out in engine-vs-engine games at 2 s + 0.2 s per move with Hash 128 MB, the conditions of MCERL, the
+  rating list the author maintains with hundreds of thousands of engine games;
+- deciding, change by change, what stays in the engine and what is dropped;
+- making sure that code and values taken from other engines are attributed and licensed (see the last two
+  sections of this file).
+
+The AI's part: writing and changing the code, building it, running the tests, and having changes to the engine
+checked in a separate session that did not write them, against one question: could this make the engine weaker,
+or break legal play or the UCI protocol?
+
+Every strength figure in this repository comes from games; where a version was not measured on its own, its
+README says how the figure was obtained. The author is responsible for the code and for everything published here.
+
+## How strength was measured
+
+This version was never measured. The project's first rating run used later development code, so its result does not belong to 0.2.
+
+## About the source
+
+The source is published without comments and without the switches used during development;
+the development history stays private. Removing comments and switches does not change the engine: built with
+the same flags, the cleaned source and the original give the same binary. Identifiers and messages were then
+translated into English; that changes names and text only, not the search (same nodes, moves and lines on the
+24 test positions). The published source builds an engine that searches exactly the same nodes and plays the
+same moves on those 24 positions as a build of the original development source.
 
 ## Build
 
 ```
-make
-./sedar
+make            # this machine
+make release    # all binaries into dist/ (Linux and Windows need zig)
 ```
 
-The code needs `-std=gnu89` (set in the `Makefile`).
+## Binaries
+
+| File | For |
+|---|---|
+| `chessenger-0.2-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
+| `chessenger-0.2-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
+| `chessenger-0.2-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
+| `chessenger-0.2-linux-arm64.tar.gz` | Linux, ARM64 (static) |
+| `chessenger-0.2-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
+| `chessenger-0.2-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
+| `chessenger-0.2-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
+| `chessenger-0.2-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
+| `chessenger-0.2-windows-arm64.zip` | Windows on ARM (ARM64) |
+
+Each archive holds the binary, `LICENSE`, `README.md` and, where the version has one, `LICENSES/`.
+
+If unsure on Windows, take `avx2`; on Windows on ARM, take `arm64`.
+
+## UCI
+
+Use Chessenger with a UCI chess GUI or from the command line.
+The engine reports itself as `id name Chessenger 0.2`.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `uci` | Engine name, author and options, then `uciok` |
+| `isready` | Answers `readyok` |
+| `position startpos`, optionally followed by `moves <move> ...` | Sets the position |
+| `position fen <FEN>` | Sets the position; moves after the FEN are not applied |
+| `setoption` | Accepted and ignored |
+| `go` with `depth`, `wtime`, `btime`, `winc`, `binc`, `movetime`, `infinite` | Starts a search, which ends with `bestmove` |
+| `stop` | Ends the search; the engine answers with `bestmove` |
+| `quit` | Exits |
+
+Commands outside the UCI protocol, for testing:
+
+| Command | What it does |
+|---|---|
+| `perft <N>` | Counts the positions N plies ahead (N up to 8) |
+| `divide <N>` | The same count split by first move (N up to 6) |
+
+`ucinewgame` is read as `uci`: the engine answers with its id and `uciok` and changes nothing. `ponderhit`, `debug` and `register` are not supported; a command the engine does not know gets no answer.
+
+### Options
+
+This version announces no UCI options; `setoption` is accepted and ignored.
+
+## Thanks
+
+- Tomasz Michniewski, for the Simplified Evaluation Function on the Chess Programming Wiki, whose piece-square tables our `eval_data.h` is based on.
+- The Chess Programming Wiki and its authors.
 
 ## License
 
 GPL-3.0-or-later, see `LICENSE`.
 
-Sedar is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+Chessenger is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
 License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any
-later version. Sedar is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
+later version. Chessenger is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
 implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
 more details.
