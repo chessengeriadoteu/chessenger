@@ -24,7 +24,8 @@ static uint64_t random_uint64(void) {
 }
 
 void init_zobrist(void) {
-    random_seed = (uint64_t)time(NULL);
+
+    random_seed = 0x9E3779B97F4A7C15ULL;
 
     for (int color = 0; color < 2; color++) {
         for (int piece = 0; piece < 7; piece++) {
@@ -110,8 +111,26 @@ void free_tt(TranspositionTable* tt) {
     tt->age = 0;
 }
 
-void store_hash(TranspositionTable* tt, uint64_t key, int depth, int score, HashFlag flag, Move best_move) {
+#define MATE_DISTANCE_BOUND 128
+
+static int score_to_tt(int score, int ply) {
+    if (score >= MATE_SCORE - MATE_DISTANCE_BOUND)  return score + ply;
+    if (score <= -MATE_SCORE + MATE_DISTANCE_BOUND) return score - ply;
+    return score;
+}
+
+static int score_from_tt(int score, int ply) {
+    if (score >= MATE_SCORE - MATE_DISTANCE_BOUND)  return score - ply;
+    if (score <= -MATE_SCORE + MATE_DISTANCE_BOUND) return score + ply;
+    return score;
+}
+
+void store_hash(TranspositionTable* tt, uint64_t key, int depth, int score, HashFlag flag, Move best_move, int ply) {
     if (!tt->entries || tt->size == 0) return;
+
+    if (score > MATE_SCORE || score < -MATE_SCORE) return;
+
+    score = score_to_tt(score, ply);
 
     int index = key & tt->mask;
     HashEntry* entry = &tt->entries[index];
@@ -130,7 +149,7 @@ void store_hash(TranspositionTable* tt, uint64_t key, int depth, int score, Hash
     }
 }
 
-bool probe_hash(TranspositionTable* tt, uint64_t key, int depth, int alpha, int beta, int* score, Move* best_move) {
+bool probe_hash(TranspositionTable* tt, uint64_t key, int depth, int alpha, int beta, int* score, Move* best_move, int ply) {
     if (!tt->entries || tt->size == 0) return false;
 
     int index = key & tt->mask;
@@ -143,13 +162,16 @@ bool probe_hash(TranspositionTable* tt, uint64_t key, int depth, int alpha, int 
     }
 
     if (entry->depth >= depth) {
+
+        int s = score_from_tt(entry->score, ply);
+
         if (entry->flag == HASH_EXACT) {
-            *score = entry->score;
+            *score = s;
             return true;
-        } else if (entry->flag == HASH_ALPHA && entry->score <= alpha) {
+        } else if (entry->flag == HASH_ALPHA && s <= alpha) {
             *score = alpha;
             return true;
-        } else if (entry->flag == HASH_BETA && entry->score >= beta) {
+        } else if (entry->flag == HASH_BETA && s >= beta) {
             *score = beta;
             return true;
         }

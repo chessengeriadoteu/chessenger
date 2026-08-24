@@ -18,6 +18,10 @@ typedef enum { PAWN, ROOK, KNIGHT, BISHOP, QUEEN, KING, EMPTY } PieceType;
 
 #define MAX_POSITION_HISTORY 150
 
+#define HISTORY_SEARCH_RESERVE 48
+
+#define HISTORY_GAME_LIMIT (MAX_POSITION_HISTORY - HISTORY_SEARCH_RESERVE)
+
 typedef struct {
     int from;
     int to;
@@ -41,7 +45,8 @@ typedef struct {
 
     uint64_t position_history[MAX_POSITION_HISTORY];
     int history_count;
-    int history_start;
+    int history_base;
+
 } Position;
 
 typedef struct {
@@ -54,6 +59,7 @@ typedef struct {
     int captured_square;
 
     int old_history_count;
+    int old_history_base;
     uint64_t removed_hash;
 } UndoInfo;
 
@@ -68,7 +74,9 @@ typedef enum {
 } GameResult;
 
 void setup_starting_position(Position* pos);
-void parse_fen(Position* pos, const char* fen);
+
+bool parse_fen(Position* pos, const char* fen);
+const char* fen_last_error(void);
 void make_move_full(Position* pos, Move* move, UndoInfo* undo);
 void undo_move_full(Position* pos, Move* move, UndoInfo* undo);
 GameResult check_game_result(Position* pos);
@@ -79,6 +87,8 @@ bool is_approaching_repetition(Position* pos);
 int count_position_occurrences(Position* pos, uint64_t hash);
 void add_position_to_history(Position* pos, uint64_t hash);
 void remove_last_position_from_history(Position* pos, UndoInfo* undo);
+
+void compact_position_history(Position* pos);
 
 Move parse_move(Position* pos, const char* move_str);
 

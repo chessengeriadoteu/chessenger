@@ -5,10 +5,10 @@
 #define SEARCH_H
 
 #include "board.h"
+#include "utils.h"
 #include <stdbool.h>
 #include <sys/time.h>
 
-#define MAX_DEPTH 32
 #define HISTORY_MAX_SCORE 10000
 
 typedef struct {
@@ -22,8 +22,8 @@ typedef struct {
 
 void init_search(void);
 void clear_killers(void);
-void store_killer(int depth, Move move);
-bool is_killer_move(int depth, Move move);
+void store_killer(int ply, Move move);
+bool is_killer_move(int ply, Move move);
 void init_history(void);
 void clear_history(void);
 void update_history(Move move, int depth, bool good_move);
@@ -33,18 +33,27 @@ void age_history(void);
 bool fast_check_stop(void);
 bool check_time(SearchInfo* info);
 int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, SearchInfo* info);
-Move search_single_depth_with_nodes(Position* pos, int depth, int alpha, SearchInfo* info);
+
+Move search_single_depth_with_nodes(Position* pos, int depth, int alpha, int beta, SearchInfo* info);
+
+bool was_root_search_interrupted(void);
 
 void score_moves(Move* moves, int count, Move tt_move);
 int piece_value(int piece);
 
-int see_capture(Position* pos, Move* move);
 bool gives_check(Position* pos, Move* move);
 
-bool get_pending_position_command(char* buffer, int buffer_size);
+extern bool stop_requested;
+extern bool position_changed;
+extern bool quit_requested;
+
+bool get_pending_input(char* buffer, int buffer_size);
+bool take_partial_input(char* buffer, int buffer_size);
 void reset_search_state(void);
 
 void set_search_time_limit(long long time_limit_ms);
+
+void set_search_unbounded(bool unbounded);
 void start_search_timer(void);
 bool is_time_exceeded(void);
 

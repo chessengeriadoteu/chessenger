@@ -10,7 +10,6 @@
 int evaluate_king_safety(Position* pos);
 int evaluate_king_safety_simplified(Position* pos);
 int evaluate_king_activity_endgame(Position* pos);
-int evaluate_enhanced_king_safety_urgency(Position* pos);
 
 int evaluate_castling_safety(Position* pos);
 int evaluate_king_shelter(Position* pos, int king_square, Color color);

@@ -13,11 +13,25 @@
 #define MAX_DEPTH 32
 #define MATE_SCORE 30000
 
+#define MAX_QUIESCENCE_DEPTH 8
+
+#define MAX_UCI_LINE 8192
+
 struct timeval get_wall_time(void);
 long long time_diff_ms(struct timeval start, struct timeval end);
 
-int get_lsb(Bitboard bb);
-void pop_lsb(Bitboard* bb);
+static inline int get_lsb(Bitboard bb) {
+    if (bb == 0) return -1;
+
+    return __builtin_ctzll(bb);
+}
+
+static inline void pop_lsb(Bitboard* bb) {
+    if (*bb != 0) {
+        *bb &= (*bb - 1);
+    }
+}
+
 int pop_count(Bitboard bb);
 
 void init_masks(void);
@@ -38,10 +52,9 @@ char* square_to_string(int square);
 
 bool validate_move_before_send(Position* pos, Move* move);
 
-bool is_material_losing_move(Position* pos, Move* move);
-int calculate_material_exchange(Position* pos, Move* move);
-
 int static_exchange_evaluation(Position* pos, Move* move);
 bool see_is_good_capture(Position* pos, Move* move);
+
+void trim_uci_line(char* line);
 
 #endif

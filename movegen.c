@@ -6,6 +6,7 @@
 #include "utils.h"
 #include "eval.h"
 #include "search.h"
+#include "magic.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -15,16 +16,17 @@ Bitboard knight_attacks[64];
 Bitboard king_attacks[64];
 
 static const int mvv_lva[7][7] = {
-    {0, 0, 0, 0, 0, 0, 0},
-    {0, 105, 205, 305, 405, 505, 605},
-    {0, 104, 204, 304, 404, 504, 604},
-    {0, 103, 203, 303, 403, 503, 603},
-    {0, 102, 202, 302, 402, 502, 602},
-    {0, 101, 201, 301, 401, 501, 601},
-    {0, 100, 200, 300, 400, 500, 600}
+
+               {105, 405, 205, 305, 505, 605, 0},
+               {102, 402, 202, 302, 502, 602, 0},
+               {104, 404, 204, 304, 504, 604, 0},
+               {103, 403, 203, 303, 503, 603, 0},
+               {101, 401, 201, 301, 501, 601, 0},
+               {100, 400, 200, 300, 500, 600, 0},
+               {0,   0,   0,   0,   0,   0,   0}
 };
 
-static inline Bitboard get_rook_attacks(int square, Bitboard occupied) {
+static inline Bitboard ray_scan_rook(int square, Bitboard occupied) {
     Bitboard attacks = 0ULL;
     int rank = square / 8;
     int file = square % 8;
@@ -56,7 +58,7 @@ static inline Bitboard get_rook_attacks(int square, Bitboard occupied) {
     return attacks;
 }
 
-static inline Bitboard get_bishop_attacks(int square, Bitboard occupied) {
+static inline Bitboard ray_scan_bishop(int square, Bitboard occupied) {
     Bitboard attacks = 0ULL;
     int rank = square / 8;
     int file = square % 8;
@@ -88,6 +90,16 @@ static inline Bitboard get_bishop_attacks(int square, Bitboard occupied) {
     return attacks;
 }
 
+static inline Bitboard get_rook_attacks(int square, Bitboard occupied) {
+    if (magic_ready) return magic_rook_attacks(square, occupied);
+    return ray_scan_rook(square, occupied);
+}
+
+static inline Bitboard get_bishop_attacks(int square, Bitboard occupied) {
+    if (magic_ready) return magic_bishop_attacks(square, occupied);
+    return ray_scan_bishop(square, occupied);
+}
+
 Bitboard get_bishop_attacks_public(int square, Bitboard occupied) {
     return get_bishop_attacks(square, occupied);
 }
@@ -98,6 +110,14 @@ Bitboard get_rook_attacks_public(int square, Bitboard occupied) {
 
 Bitboard get_queen_attacks_public(int square, Bitboard occupied) {
     return get_rook_attacks(square, occupied) | get_bishop_attacks(square, occupied);
+}
+
+Bitboard ray_scan_rook_public(int square, Bitboard occupied) {
+    return ray_scan_rook(square, occupied);
+}
+
+Bitboard ray_scan_bishop_public(int square, Bitboard occupied) {
+    return ray_scan_bishop(square, occupied);
 }
 
 void init_magic_bitboards(void) {
@@ -143,20 +163,19 @@ void init_magic_bitboards(void) {
         }
     }
 
+    if (magic_init() != 0) {
+        fprintf(stderr, "MAGIC: no multiplier found within the attempt limit; using ray scan instead\n");
+    }
 }
 
 bool is_square_attacked(Position* pos, int square, Color by_color) {
     if (!pos || square < 0 || square > 63) return false;
 
-    if (by_color == WHITE) {
-        int file = square % 8;
-        if (file > 0 && (pos->pieces[WHITE][PAWN] & (1ULL << (square - 9)))) return true;
-        if (file < 7 && (pos->pieces[WHITE][PAWN] & (1ULL << (square - 7)))) return true;
-    } else {
-        int file = square % 8;
-        if (file > 0 && (pos->pieces[BLACK][PAWN] & (1ULL << (square + 7)))) return true;
-        if (file < 7 && (pos->pieces[BLACK][PAWN] & (1ULL << (square + 9)))) return true;
-    }
+    Bitboard pawns = pos->pieces[by_color][PAWN];
+    Bitboard pawn_attacks = (by_color == WHITE)
+        ? (((pawns & ~file_masks[0]) << 7) | ((pawns & ~file_masks[7]) << 9))
+        : (((pawns & ~file_masks[0]) >> 9) | ((pawns & ~file_masks[7]) >> 7));
+    if (pawn_attacks & (1ULL << square)) return true;
 
     if (knight_attacks[square] & pos->pieces[by_color][KNIGHT]) return true;
 
@@ -652,7 +671,8 @@ void score_moves(Move* moves, int move_count, Move hash_move) {
     for (int i = 0; i < move_count; i++) {
         moves[i].score = 0;
 
-        if (moves[i].from == hash_move.from && moves[i].to == hash_move.to) {
+        if (moves[i].from == hash_move.from && moves[i].to == hash_move.to
+            && moves[i].promotion == hash_move.promotion) {
             moves[i].score = 10000;
             continue;
         }
@@ -661,8 +681,13 @@ void score_moves(Move* moves, int move_count, Move hash_move) {
             moves[i].score = mvv_lva[moves[i].piece][moves[i].captured];
         }
 
-        if (moves[i].promotion != EMPTY) {
-            moves[i].score = 900 + moves[i].promotion * 10;
+        if (moves[i].promotion != EMPTY && moves[i].promotion < 7) {
+
+            static const int promo_rank[7] = {
+                [PAWN] = 0, [ROOK] = 3, [KNIGHT] = 1, [BISHOP] = 2,
+                [QUEEN] = 4, [KING] = 0, [EMPTY] = 0
+            };
+            moves[i].score = 900 + promo_rank[moves[i].promotion] * 10;
         }
 
         if (moves[i].is_castling) {
@@ -697,18 +722,18 @@ void score_moves_with_checks(Position* pos, Move* moves, int move_count, Move ha
     }
 }
 
-void score_moves_with_killers(Move* moves, int move_count, Move hash_move, int depth) {
+void score_moves_with_killers(Move* moves, int move_count, Move hash_move, int ply) {
     score_moves(moves, move_count, hash_move);
 
     for (int i = 0; i < move_count; i++) {
-        if (is_killer_move(depth, moves[i])) {
+        if (is_killer_move(ply, moves[i])) {
             moves[i].score += 80;
         }
     }
 }
 
-void score_moves_with_history(Move* moves, int move_count, Move hash_move, int depth) {
-    score_moves_with_killers(moves, move_count, hash_move, depth);
+void score_moves_with_history(Move* moves, int move_count, Move hash_move, int ply) {
+    score_moves_with_killers(moves, move_count, hash_move, ply);
 
     for (int i = 0; i < move_count; i++) {
         moves[i].score += get_history_score(moves[i]);
@@ -726,13 +751,14 @@ void debug_en_passant_position(Position* pos) {
 
 }
 
-void score_moves_with_history_enhanced(Position* pos, Move* moves, int move_count, Move hash_move, int depth) {
+void score_moves_with_history_enhanced(Position* pos, Move* moves, int move_count, Move hash_move, int ply) {
 
-    score_moves_with_history(moves, move_count, hash_move, depth);
+    score_moves_with_history(moves, move_count, hash_move, ply);
 
     for (int i = 0; i < move_count; i++) {
         if (moves[i].captured != EMPTY) {
-            int see_value = see_capture(pos, &moves[i]);
+
+            int see_value = static_exchange_evaluation(pos, &moves[i]);
             if (see_value < -50) {
                 moves[i].score -= 200;
             } else if (see_value > 50) {

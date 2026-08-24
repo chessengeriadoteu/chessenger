@@ -60,10 +60,13 @@ static inline Bitboard get_adjacent_files(int file) {
 }
 
 static inline Bitboard get_forward_mask(int square, Color color) {
+    int rank = square >> 3;
     if (color == WHITE) {
-        return 0xFFFFFFFFFFFFFFFFULL << (square + 8);
+        if (rank >= 7) return 0;
+        return 0xFFFFFFFFFFFFFFFFULL << ((rank + 1) * 8);
     } else {
-        return 0xFFFFFFFFFFFFFFFFULL >> (64 - square);
+        if (rank <= 0) return 0;
+        return (1ULL << (rank * 8)) - 1ULL;
     }
 }
 
@@ -118,9 +121,9 @@ bool is_backward_pawn(Position* pos, int square, Color color) {
         int pawn_rank = get_rank(pawn_square);
 
         if (color == WHITE) {
-            if (pawn_rank >= rank) return false;
-        } else {
             if (pawn_rank <= rank) return false;
+        } else {
+            if (pawn_rank >= rank) return false;
         }
 
         pop_lsb(&friendly_pawns);

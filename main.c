@@ -6,25 +6,108 @@
 #include <string.h>
 #include <sys/time.h>
 #include <unistd.h>
-#ifndef _WIN32
 #include <fcntl.h>
-#endif
-#ifndef _WIN32
-#include <sys/select.h>
-#endif
+
 #include "board.h"
 #include "movegen.h"
 #include "eval.h"
 #include "tt.h"
 #include "utils.h"
 #include "search.h"
-#ifdef _WIN32
-int win_stdin_ready(void);
-int win_stdin_read(int fd, void* buf, unsigned int count);
-#endif
 
 bool position_changed = false;
 bool stop_requested = false;
+bool quit_requested = false;
+
+static char input_queue[MAX_UCI_LINE * 4] = "";
+static size_t input_queue_pos = 0;
+
+static void queue_input(const char* text) {
+    size_t used = strlen(input_queue);
+    const char* p = text;
+
+    while (*p != '\0') {
+        const char* nl = strchr(p, '\n');
+        size_t line_len = nl ? (size_t)(nl - p) : strlen(p);
+        size_t needed   = line_len + 2;
+
+        if (used + needed > sizeof(input_queue)) {
+            int shown = (int)(line_len < 40 ? line_len : 40);
+            printf("info string ERROR: input queue full; %zu bytes dropped, "
+                   "first dropped command: %.*s\n", strlen(p), shown, p);
+            fflush(stdout);
+            return;
+        }
+        memcpy(input_queue + used, p, line_len);
+        used += line_len;
+        input_queue[used++] = '\n';
+        input_queue[used]   = '\0';
+        p = nl ? nl + 1 : p + line_len;
+    }
+}
+
+static bool drop_broken_line(char* out, size_t size) {
+    size_t len = strlen(out);
+    if (len > 0 && out[len - 1] == '\n') return false;
+
+    const char* nl = memchr(out, '\n', size);
+
+    if (nl != NULL) {
+        printf("info string ERROR: NUL byte in UCI input line; line dropped\n");
+    } else {
+        if (feof(stdin) && len > 0) return false;
+        printf("info string ERROR: UCI input line longer than %d bytes; line dropped\n",
+               (int)size - 1);
+        int c;
+        while ((c = fgetc(stdin)) != EOF && c != '\n') {   }
+    }
+    fflush(stdout);
+    out[0] = '\0';
+    return true;
+}
+
+static bool read_uci_line(char* out, size_t size) {
+    if (input_queue[input_queue_pos] != '\0') {
+        size_t i = 0;
+        while (input_queue[input_queue_pos] != '\0' &&
+               input_queue[input_queue_pos] != '\n' && i + 1 < size) {
+            out[i++] = input_queue[input_queue_pos++];
+        }
+        out[i] = '\0';
+        if (input_queue[input_queue_pos] == '\n') input_queue_pos++;
+        if (input_queue[input_queue_pos] == '\0') {
+            input_queue[0] = '\0';
+            input_queue_pos = 0;
+        }
+        return true;
+    }
+
+    char tail[MAX_UCI_LINE];
+    if (take_partial_input(tail, sizeof(tail))) {
+        snprintf(out, size, "%s", tail);
+        size_t used = strlen(out);
+        if (used + 1 >= size) return true;
+
+        memset(out + used, 0, size - used);
+        if (fgets(out + used, (int)(size - used), stdin) == NULL) {
+            return used > 0;
+        }
+        drop_broken_line(out, size);
+        return true;
+    }
+
+    memset(out, 0, size);
+    if (fgets(out, (int)size, stdin) == NULL) return false;
+    drop_broken_line(out, size);
+    return true;
+}
+
+static void drain_search_input(void) {
+    static char queued[MAX_UCI_LINE * 2];
+    if (get_pending_input(queued, sizeof(queued))) {
+        queue_input(queued);
+    }
+}
 
 void parse_position(Position* pos, const char* input);
 int parse_depth(const char* input);
@@ -38,34 +121,6 @@ float assess_position_complexity(Position* pos);
 float detect_game_phase(Position* pos);
 float detect_time_pressure(int my_time, int moves_played);
 
-int check_stop(void) {
-#ifndef _WIN32
-    fd_set fds;
-    struct timeval tv = {0, 0};
-    FD_ZERO(&fds);
-    FD_SET(STDIN_FILENO, &fds);
-#endif
-
-#ifdef _WIN32
-    if (win_stdin_ready()) {
-#else
-    if (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0) {
-#endif
-        char buf[256];
-        if (fgets(buf, sizeof(buf), stdin)) {
-            if (strstr(buf, "stop")) {
-                stop_requested = true;
-                return 1;
-            }
-            if (strstr(buf, "position") || strstr(buf, "ucinewgame")) {
-                position_changed = true;
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
 void print_uci_info(int depth, int seldepth, int score, long long time_ms, long long nodes, const char* pv) {
 
     long long nps = 0;
@@ -75,20 +130,35 @@ void print_uci_info(int depth, int seldepth, int score, long long time_ms, long 
         nps = nodes * 1000LL;
     }
 
-    printf("info depth %d seldepth %d score cp %d time %lld nodes %lld nps %lld pv %s\n",
-           depth, seldepth, score, time_ms, nodes, nps, pv);
+    int mate_plies = MATE_SCORE - (score < 0 ? -score : score);
+    if (mate_plies >= 0 && mate_plies < MAX_DEPTH * 2) {
+        int mate_moves = (mate_plies + 1) / 2;
+        if (score < 0) mate_moves = -mate_moves;
+        printf("info depth %d seldepth %d score mate %d time %lld nodes %lld nps %lld pv %s\n",
+               depth, seldepth, mate_moves, time_ms, nodes, nps, pv);
+    } else {
+        printf("info depth %d seldepth %d score cp %d time %lld nodes %lld nps %lld pv %s\n",
+               depth, seldepth, score, time_ms, nodes, nps, pv);
+    }
     fflush(stdout);
 }
 
-void print_safe_bestmove(Move* best_move) {
+void print_safe_bestmove(Move* best_move, Position* pos) {
 
     if (best_move && best_move->from >= 0 && best_move->to >= 0 &&
         best_move->from < 64 && best_move->to < 64 &&
         best_move->from != best_move->to) {
         printf("bestmove %s\n", move_to_string(best_move));
+    } else if (pos) {
+        Move legal[256];
+        int n = generate_legal_moves(pos, legal);
+        if (n > 0) {
+            printf("bestmove %s\n", move_to_string(&legal[0]));
+        } else {
+            printf("bestmove 0000\n");
+        }
     } else {
-
-        printf("bestmove e2e4\n");
+        printf("bestmove 0000\n");
     }
     fflush(stdout);
 }
@@ -119,7 +189,15 @@ int calculate_search_time(int wtime, int btime, int winc, int binc, Color to_mov
     int my_increment = (to_move == WHITE) ? winc : binc;
 
     if (my_time <= 0) return 100;
-    if (my_time < 5000 && my_increment <= 0) return my_time / 10;
+
+    if (my_increment <= 0) {
+        const int MOVE_OVERHEAD = 30;
+        const int MOVE_HORIZON  = 25;
+        int safe = my_time - MOVE_OVERHEAD;
+        if (safe < 1) return 1;
+        int alloc = safe / MOVE_HORIZON;
+        return alloc < 1 ? 1 : alloc;
+    }
 
     float total_time_left = my_time / 1000.0f;
     float increment = my_increment / 1000.0f;
@@ -191,12 +269,19 @@ int calculate_search_time(int wtime, int btime, int winc, int binc, Color to_mov
 
     int final_time = (int)(time_per_move * 1000.0f);
 
-    if (final_time < 100) final_time = 100;
+    int min_time = 100;
+
+    long long sustainable = (long long)my_increment + my_time / 40;
+    if (min_time > sustainable) min_time = (int)sustainable;
+    if (min_time > my_time / 4) min_time = my_time / 4;
+    if (min_time < 10) min_time = 10;
+
+    if (final_time < min_time) final_time = min_time;
     if (final_time > 60000) final_time = 60000;
 
     if (my_time < 10000) {
         final_time = my_time / 8;
-        if (final_time < 100) final_time = 100;
+        if (final_time < min_time) final_time = min_time;
     }
 
     printf("info string TIME_MGMT: calculated=%dms phase=%s algorithm=%s pieces=%d move_est=%d total_time=%.1fs\n",
@@ -259,45 +344,102 @@ int parse_movetime(const char* input) {
     return ptr ? atoi(ptr + 8) : 1000;
 }
 
+static bool match_legal_move(Position* pos, const char* move_str, Move* out) {
+    Move parsed = parse_move(pos, move_str);
+    if (parsed.from < 0) return false;
+
+    Move legal[MAX_MOVES];
+    int legal_count = generate_legal_moves(pos, legal);
+
+    for (int i = 0; i < legal_count; i++) {
+        if (legal[i].from == parsed.from &&
+            legal[i].to == parsed.to &&
+            legal[i].promotion == parsed.promotion) {
+            *out = legal[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool position_desync = false;
+static char position_desync_reason[96] = "";
+
+static void apply_moves_from_command(Position* pos, const char* input) {
+    const char* moves_ptr = strstr(input, "moves");
+    if (!moves_ptr) return;
+    moves_ptr += 5;
+
+    char move_str[6];
+    int move_index = 0;
+    while (*moves_ptr) {
+
+        while (*moves_ptr == ' ') moves_ptr++;
+        if (!*moves_ptr) break;
+
+        int i = 0;
+        while (*moves_ptr && *moves_ptr != ' ' && i < 5) {
+            move_str[i++] = *moves_ptr++;
+        }
+        move_str[i] = '\0';
+
+        bool overlong = (*moves_ptr != '\0' && *moves_ptr != ' ');
+        while (*moves_ptr != '\0' && *moves_ptr != ' ') moves_ptr++;
+
+        move_index++;
+
+        Move move;
+        if (overlong || !match_legal_move(pos, move_str, &move)) {
+            printf("info string ERROR: illegal or unparsable move '%s' (#%d) in position command; "
+                   "aborting move sequence\n", move_str, move_index);
+            fflush(stdout);
+
+            position_desync = true;
+            snprintf(position_desync_reason, sizeof(position_desync_reason),
+                     "move '%s' (#%d)", move_str, move_index);
+            return;
+        }
+
+        if (pos->history_count >= HISTORY_GAME_LIMIT) {
+            compact_position_history(pos);
+        }
+
+        UndoInfo undo;
+        make_move_full(pos, &move, &undo);
+    }
+}
+
 void parse_position(Position* pos, const char* input) {
     if (strstr(input, "startpos")) {
         setup_starting_position(pos);
-
-        const char* moves_ptr = strstr(input, "moves");
-        if (moves_ptr) {
-            moves_ptr += 5;
-
-            char move_str[6];
-            while (*moves_ptr) {
-
-                while (*moves_ptr == ' ') moves_ptr++;
-                if (!*moves_ptr) break;
-
-                int i = 0;
-                while (*moves_ptr && *moves_ptr != ' ' && i < 5) {
-                    move_str[i++] = *moves_ptr++;
-                }
-                move_str[i] = '\0';
-
-                Move move = parse_move(pos, move_str);
-                if (move.from >= 0) {
-                    UndoInfo undo;
-                    make_move_full(pos, &move, &undo);
-                }
-            }
-        }
+        position_desync = false;
+        apply_moves_from_command(pos, input);
     } else if (strstr(input, "fen")) {
         const char* fen_start = strstr(input, "fen") + 4;
         while (*fen_start == ' ') fen_start++;
 
+        const char* fen_end = strstr(fen_start, " moves");
+        size_t fen_len = fen_end ? (size_t)(fen_end - fen_start) : strlen(fen_start);
+
         char fen[256];
-        strncpy(fen, fen_start, sizeof(fen) - 1);
-        fen[sizeof(fen) - 1] = '\0';
+        if (fen_len >= sizeof(fen)) {
+            printf("info string ERROR: bad FEN in position command: FEN too long "
+                   "(%zu chars, max %zu); position unchanged\n",
+                   fen_len, sizeof(fen) - 1);
+            fflush(stdout);
+            return;
+        }
+        memcpy(fen, fen_start, fen_len);
+        fen[fen_len] = '\0';
 
-        char* moves_ptr = strstr(fen, " moves");
-        if (moves_ptr) *moves_ptr = '\0';
-
-        parse_fen(pos, fen);
+        if (!parse_fen(pos, fen)) {
+            printf("info string ERROR: bad FEN in position command: %s; "
+                   "position unchanged\n", fen_last_error());
+            fflush(stdout);
+            return;
+        }
+        position_desync = false;
+        apply_moves_from_command(pos, input);
     }
 }
 
@@ -317,6 +459,58 @@ int parse_depth(const char* input) {
     return 6;
 }
 
+#define ROOT_FULL_ALPHA (-31000)
+#define ROOT_FULL_BETA  ( 31000)
+
+_Static_assert(ROOT_FULL_BETA > MATE_SCORE, "root sentinel must lie outside the mate score band");
+_Static_assert(-(ROOT_FULL_ALPHA) > MATE_SCORE, "root sentinel must lie outside the mate score band");
+#define ASPIRATION_WINDOW   30
+#define MIN_ASPIRATION_DEPTH 3
+
+static Move search_root_with_aspiration(Position* pos, int depth, int previous_score,
+                                        bool use_aspiration, SearchInfo* info,
+                                        bool* window_open) {
+    int delta = ASPIRATION_WINDOW;
+    int alpha = ROOT_FULL_ALPHA;
+    int beta  = ROOT_FULL_BETA;
+
+    if (use_aspiration) {
+        alpha = previous_score - delta;
+        beta  = previous_score + delta;
+
+        if (alpha < ROOT_FULL_ALPHA) alpha = ROOT_FULL_ALPHA;
+        if (beta  > ROOT_FULL_BETA)  beta  = ROOT_FULL_BETA;
+    }
+
+    Move best = {0};
+    *window_open = false;
+
+    while (true) {
+        best = search_single_depth_with_nodes(pos, depth, alpha, beta, info);
+
+        if (stop_requested || position_changed || is_time_exceeded()) {
+
+            *window_open = (info->score <= alpha && alpha > ROOT_FULL_ALPHA) ||
+                           (info->score >= beta  && beta  < ROOT_FULL_BETA);
+            break;
+        }
+
+        if (info->score <= alpha && alpha > ROOT_FULL_ALPHA) {
+            delta *= 4;
+            alpha = previous_score - delta;
+            if (alpha < ROOT_FULL_ALPHA) alpha = ROOT_FULL_ALPHA;
+        } else if (info->score >= beta && beta < ROOT_FULL_BETA) {
+            delta *= 4;
+            beta = previous_score + delta;
+            if (beta > ROOT_FULL_BETA) beta = ROOT_FULL_BETA;
+        } else {
+            break;
+        }
+    }
+
+    return best;
+}
+
 Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_info) {
 
     set_search_time_limit(time_limit_ms);
@@ -327,14 +521,15 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
     bool valid_move_found = false;
     int previous_score = 0;
 
-    const int ASPIRATION_WINDOW = 30;
-    const int MIN_ASPIRATION_DEPTH = 3;
+    long long nodes_total = 0;
 
     for (int depth = 1; depth <= MAX_DEPTH; depth++) {
 
-        long long elapsed_before = time_diff_ms(start_time, get_wall_time());
-        if (elapsed_before > time_limit_ms * 0.9) {
-            break;
+        if (depth > 1) {
+            long long elapsed_before = time_diff_ms(start_time, get_wall_time());
+            if (elapsed_before > time_limit_ms * 0.9) {
+                break;
+            }
         }
 
         SearchInfo info = {0};
@@ -342,42 +537,39 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
         info.nodes = 0;
         info.depth = depth;
 
-        Move current_best;
+        bool use_aspiration = (depth >= MIN_ASPIRATION_DEPTH && valid_move_found);
+        bool window_open = false;
+        Move current_best = search_root_with_aspiration(pos, depth, previous_score,
+                                                        use_aspiration, &info, &window_open);
 
-        if (depth >= MIN_ASPIRATION_DEPTH && previous_score != 0 && valid_move_found) {
+        nodes_total += info.nodes;
 
-            int alpha = previous_score - ASPIRATION_WINDOW;
-            int beta = previous_score + ASPIRATION_WINDOW;
+        bool iteration_interrupted = was_root_search_interrupted();
 
-            current_best = search_single_depth_with_nodes(pos, depth, alpha, &info);
+        if (position_changed) break;
 
-            if (info.score <= alpha) {
+        if (iteration_interrupted || window_open) {
 
-                info.nodes = 0;
-                current_best = search_single_depth_with_nodes(pos, depth, previous_score - 150, &info);
-            } else if (info.score >= beta) {
-
-                info.nodes = 0;
-                current_best = search_single_depth_with_nodes(pos, depth, previous_score + 150, &info);
+            if (!valid_move_found && current_best.from != current_best.to) {
+                best_move = current_best;
+                valid_move_found = true;
             }
-
-        } else {
-
-            current_best = search_single_depth_with_nodes(pos, depth, 0, &info);
-        }
-
-        if (stop_requested || position_changed || is_time_exceeded()) {
-    		break;
+            break;
         }
 
         best_move = current_best;
         valid_move_found = true;
         previous_score = info.score;
         *final_info = info;
+        final_info->nodes = nodes_total;
 
         long long elapsed = time_diff_ms(start_time, get_wall_time());
 
-        print_uci_info(depth, info.seldepth, info.score, elapsed, info.nodes, info.pv);
+        print_uci_info(depth, info.seldepth, info.score, elapsed, nodes_total, info.pv);
+
+        if (stop_requested || is_time_exceeded()) {
+            break;
+        }
 
         if (depth >= 6) {
             if (info.score > 800) break;
@@ -390,25 +582,36 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
 
 int main() {
 
-    setvbuf(stdin, NULL, _IOLBF, 0);
+    setvbuf(stdin, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     init_masks();
     init_magic_bitboards();
+    init_zobrist();
     init_tt(&main_tt, 64);
     init_search();
 
     Position pos;
     setup_starting_position(&pos);
 
-    char input[1024];
+    static char input[MAX_UCI_LINE];
 
-    while (fgets(input, sizeof(input), stdin)) {
+    while (read_uci_line(input, sizeof(input))) {
 
-        input[strcspn(input, "\n")] = 0;
+        trim_uci_line(input);
 
-        if (strncmp(input, "uci", 3) == 0) {
-            printf("id name Chessenger 0.2\n");
+        if (strcmp(input, "ucinewgame") == 0) {
+            setup_starting_position(&pos);
+            position_changed = false;
+            stop_requested = false;
+
+            reset_search_state();
+            clear_tt(&main_tt);
+            clear_killers();
+            clear_history();
+            position_desync = false; position_desync_reason[0] = '\0';
+        } else if (strcmp(input, "uci") == 0) {
+            printf("id name Chessenger 0.3\n");
             printf("id author chessengeria.eu\n");
             printf("uciok\n");
             fflush(stdout);
@@ -416,11 +619,6 @@ int main() {
         } else if (strncmp(input, "isready", 7) == 0) {
             printf("readyok\n");
             fflush(stdout);
-
-        } else if (strncmp(input, "ucinewgame", 10) == 0) {
-            setup_starting_position(&pos);
-            position_changed = false;
-            stop_requested = false;
 
         } else if (strncmp(input, "position", 8) == 0) {
             parse_position(&pos, input);
@@ -500,14 +698,42 @@ int main() {
                    pos.en_passant_square >= 0 ? square_to_string(pos.en_passant_square) : "-");
             fflush(stdout);
 
+        } else if (strcmp(input, "eval") == 0) {
+
+            int eval_stm = evaluate_position(&pos);
+            int eval_white = (pos.to_move == WHITE) ? eval_stm : -eval_stm;
+            printf("info string eval stm %d white %d\n", eval_stm, eval_white);
+            fflush(stdout);
+
+        } else if (strcmp(input, "hash") == 0) {
+
+            printf("info string hash 0x%016llx\n",
+                   (unsigned long long)compute_hash(&pos));
+            fflush(stdout);
+
         } else if (strncmp(input, "go", 2) == 0) {
+
+            if (position_desync) {
+                printf("info string ERROR: position invalid (%s); refusing to move "
+                       "until a valid position command arrives\n", position_desync_reason);
+                printf("bestmove 0000\n");
+                fflush(stdout);
+                continue;
+            }
 
             stop_requested = false;
             position_changed = false;
 
             reset_search_state();
 
+            main_tt.age++;
+
             if (strstr(input, "infinite")) {
+
+                set_search_time_limit(0);
+                start_search_timer();
+
+                set_search_unbounded(true);
 
                 SearchInfo info = {0};
                 struct timeval search_start = get_wall_time();
@@ -518,39 +744,18 @@ int main() {
                 bool valid_move_found = false;
                 int previous_score = 0;
 
-                const int ASPIRATION_WINDOW = 30;
-                const int MIN_ASPIRATION_DEPTH = 3;
-
                 for (int depth = 1; depth <= MAX_DEPTH; depth++) {
                     if (stop_requested || position_changed) break;
 
                     info.depth = depth;
-                    info.nodes = 0;
 
-                    Move current_best;
+                    bool use_aspiration = (depth >= MIN_ASPIRATION_DEPTH && valid_move_found);
+                    bool window_open = false;
+                    Move current_best = search_root_with_aspiration(&pos, depth, previous_score,
+                                                                    use_aspiration, &info,
+                                                                    &window_open);
 
-                    if (depth >= MIN_ASPIRATION_DEPTH && previous_score != 0 && valid_move_found) {
-
-                        int alpha = previous_score - ASPIRATION_WINDOW;
-                        int beta = previous_score + ASPIRATION_WINDOW;
-
-                        current_best = search_single_depth_with_nodes(&pos, depth, alpha, &info);
-
-                        if (info.score <= alpha) {
-
-                            info.nodes = 0;
-                            current_best = search_single_depth_with_nodes(&pos, depth, previous_score - 150, &info);
-                        } else if (info.score >= beta) {
-
-                            info.nodes = 0;
-                            current_best = search_single_depth_with_nodes(&pos, depth, previous_score + 150, &info);
-                        }
-                    } else {
-
-                        current_best = search_single_depth_with_nodes(&pos, depth, 0, &info);
-                    }
-
-                    if (!stop_requested && !position_changed) {
+                    if (!stop_requested && !position_changed && !window_open) {
                         best_move = current_best;
                         valid_move_found = true;
                         previous_score = info.score;
@@ -562,9 +767,32 @@ int main() {
                     }
                 }
 
-                if (!position_changed && valid_move_found) {
-                    print_safe_bestmove(&best_move);
+                while (!stop_requested && !position_changed && !quit_requested) {
+
+                    static char wait_line[MAX_UCI_LINE];
+                    if (!read_uci_line(wait_line, sizeof(wait_line))) {
+                        quit_requested = true;
+                        break;
+                    }
+                    trim_uci_line(wait_line);
+
+                    if (wait_line[0] == '\0') continue;
+
+                    if (strncmp(wait_line, "stop", 4) == 0) {
+                        stop_requested = true;
+                    } else if (strncmp(wait_line, "quit", 4) == 0) {
+                        quit_requested = true;
+                    } else if (strncmp(wait_line, "isready", 7) == 0) {
+                        printf("readyok\n");
+                        fflush(stdout);
+                    } else {
+
+                        queue_input(wait_line);
+                        break;
+                    }
                 }
+
+                print_safe_bestmove(valid_move_found ? &best_move : NULL, &pos);
 
             } else if (strstr(input, "movetime")) {
 
@@ -574,7 +802,7 @@ int main() {
                 SearchInfo info = {0};
                 Move best_move = search_with_time_limit(&pos, movetime, &info);
 
-                print_safe_bestmove(&best_move);
+                print_safe_bestmove(&best_move, &pos);
 
             } else if (strstr(input, "wtime") || strstr(input, "btime")) {
 
@@ -588,27 +816,86 @@ int main() {
                 SearchInfo info = {0};
                 Move best_move = search_with_time_limit(&pos, search_time, &info);
 
-                print_safe_bestmove(&best_move);
+                print_safe_bestmove(&best_move, &pos);
 
             } else {
 
-                int depth = parse_depth(input);
+                set_search_time_limit(0);
+                start_search_timer();
 
-                SearchInfo info = {0};
+                int depth_target = parse_depth(input);
+
                 struct timeval search_start = get_wall_time();
-                info.start_time = search_start;
-                info.nodes = 0;
-                info.depth = depth;
+                Move best_move = {0};
+                bool valid_move_found = false;
+                int previous_score = 0;
+                int last_completed_depth = 0;
 
-                Move best_move = search_single_depth_with_nodes(&pos, depth, 0, &info);
+                long long nodes_total = 0;
+
+                for (int depth = 1; depth <= depth_target; depth++) {
+                    SearchInfo info = {0};
+                    info.start_time = search_start;
+                    info.nodes = 0;
+                    info.depth = depth;
+
+                    bool use_aspiration = (depth >= MIN_ASPIRATION_DEPTH && valid_move_found);
+                    bool window_open = false;
+                    Move current_best = search_root_with_aspiration(&pos, depth, previous_score,
+                                                                    use_aspiration, &info,
+                                                                    &window_open);
+
+                    nodes_total += info.nodes;
+
+                    bool iteration_interrupted = was_root_search_interrupted();
+
+                    if (position_changed) break;
+
+                    if (iteration_interrupted || window_open) {
+                        if (!valid_move_found && current_best.from != current_best.to) {
+                            best_move = current_best;
+                            valid_move_found = true;
+                        }
+                        break;
+                    }
+
+                    best_move = current_best;
+                    valid_move_found = true;
+                    previous_score = info.score;
+                    last_completed_depth = depth;
+
+                    long long elapsed_iter = time_diff_ms(search_start, get_wall_time());
+                    if (elapsed_iter < 1) elapsed_iter = 1;
+
+                    print_uci_info(depth, info.seldepth, info.score, elapsed_iter,
+                                   nodes_total, info.pv);
+
+                    if (stop_requested) break;
+                }
 
                 long long elapsed = time_diff_ms(search_start, get_wall_time());
                 if (elapsed < 1) elapsed = 1;
 
-                print_uci_info(depth, info.seldepth, info.score, elapsed, info.nodes, info.pv);
+                bool search_aborted = stop_requested || position_changed || quit_requested;
 
-                print_safe_bestmove(&best_move);
+                if (search_aborted) {
+                    if (last_completed_depth == 0) {
+                        printf("info string search aborted at depth %d after %lld ms; "
+                               "no depth completed, result not reported\n",
+                               depth_target, elapsed);
+                    } else {
+                        printf("info string search aborted after %lld ms; "
+                               "deepest completed depth %d of %d requested\n",
+                               elapsed, last_completed_depth, depth_target);
+                    }
+                    fflush(stdout);
+                }
+
+                print_safe_bestmove(&best_move, &pos);
             }
+
+            drain_search_input();
+            if (quit_requested) break;
 
         } else if (strncmp(input, "stop", 4) == 0) {
             stop_requested = true;

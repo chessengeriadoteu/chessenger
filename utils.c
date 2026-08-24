@@ -25,18 +25,6 @@ long long time_diff_ms(struct timeval start, struct timeval end) {
            (end.tv_usec - start.tv_usec) / 1000LL;
 }
 
-int get_lsb(Bitboard bb) {
-    if (bb == 0) return -1;
-
-    return __builtin_ctzll(bb);
-}
-
-void pop_lsb(Bitboard* bb) {
-    if (*bb != 0) {
-        *bb &= (*bb - 1);
-    }
-}
-
 int pop_count(Bitboard bb) {
     return __builtin_popcountll(bb);
 }
@@ -75,26 +63,31 @@ void print_position(Position* pos) {
         return;
     }
 
-    char pieces[] = ".PRNBQK.prnbqk.";
+    static const char white_chars[] = "PRNBQK";
+    static const char black_chars[] = "prnbqk";
 
     printf("\n");
     for (int rank = 7; rank >= 0; rank--) {
         printf("%d ", rank + 1);
         for (int file = 0; file < 8; file++) {
             int square = rank * 8 + file;
-            int piece_type = EMPTY;
+            PieceType found_piece = EMPTY;
+            Color found_color = WHITE;
 
             for (Color color = WHITE; color <= BLACK; color++) {
                 for (PieceType piece = PAWN; piece <= KING; piece++) {
                     if (pos->pieces[color][piece] & (1ULL << square)) {
-                        piece_type = piece + (color == BLACK ? 8 : 0);
+                        found_piece = piece;
+                        found_color = color;
                         break;
                     }
                 }
-                if (piece_type != EMPTY) break;
+                if (found_piece != EMPTY) break;
             }
 
-            printf("%c ", pieces[piece_type]);
+            printf("%c ", found_piece == EMPTY
+                              ? '.'
+                              : (found_color == WHITE ? white_chars : black_chars)[found_piece]);
         }
         printf("\n");
     }
@@ -164,8 +157,9 @@ char* position_to_fen(Position* pos) {
             for (Color color = WHITE; color <= BLACK; color++) {
                 for (PieceType piece = PAWN; piece <= KING; piece++) {
                     if (pos->pieces[color][piece] & (1ULL << square)) {
+
                         char pieces[] = "PRNBQK";
-                        piece_char = pieces[piece - 1];
+                        piece_char = pieces[piece];
                         if (color == BLACK) piece_char += 32;
                         break;
                     }
@@ -287,60 +281,6 @@ bool validate_move_before_send(Position* pos, Move* move) {
     return false;
 }
 
-bool is_material_losing_move(Position* pos, Move* move) {
-    if (!pos || !move) return false;
-
-    int simple_exchange = calculate_material_exchange(pos, move);
-    if (simple_exchange < -100) {
-        return true;
-    }
-
-    Position temp_pos = *pos;
-    UndoInfo undo;
-
-    make_move_full(&temp_pos, move, &undo);
-
-    Move opponent_moves[MAX_MOVES];
-    int move_count = generate_legal_moves(&temp_pos, opponent_moves);
-
-    bool threat_detected = false;
-    for (int i = 0; i < move_count; i++) {
-        int opponent_gain = calculate_material_exchange(&temp_pos, &opponent_moves[i]);
-        if (opponent_gain >= 100) {
-
-            threat_detected = true;
-            break;
-        }
-    }
-
-    undo_move_full(&temp_pos, move, &undo);
-
-    return threat_detected;
-}
-
-int calculate_material_exchange(Position* pos, Move* move) {
-    if (!pos || !move) return 0;
-
-    static const int piece_values[] = {0, 100, 500, 320, 330, 900, 10000, 0};
-
-    int gain = 0;
-    int loss = 0;
-
-    if (move->captured != EMPTY && move->captured <= KING) {
-        gain = piece_values[move->captured];
-    }
-
-    if (move->piece <= KING) {
-
-        Color enemy = 1 - pos->to_move;
-        if (is_square_attacked(pos, move->to, enemy)) {
-            loss = piece_values[move->piece];
-        }
-    }
-
-    return gain - loss;
-}
-
 static Bitboard get_attackers_of_square(Position* pos, int square, Color color, Bitboard occupied) {
     if (!pos || square < 0 || square > 63) return 0;
 
@@ -405,16 +345,14 @@ static int get_least_valuable_attacker(Position* pos, Bitboard attackers, Color 
 
 int static_exchange_evaluation(Position* pos, Move* move) {
     if (!pos || !move) return 0;
+    if (move->from < 0 || move->from > 63 || move->to < 0 || move->to > 63) return 0;
 
-    static const int see_values[] = {0, 100, 500, 325, 325, 975, 10000};
+    static const int see_values[7] = { 100, 500, 325, 325, 975, 10000, 0 };
 
-    int target_square = move->to;
-    Color side_to_move = pos->to_move;
+    const int target_square = move->to;
 
-    int gain[32];
+    int gain[34];
     int depth = 0;
-
-    gain[depth] = (move->captured != EMPTY) ? see_values[move->captured] : 0;
 
     Bitboard occupied = 0;
     for (int c = 0; c < 2; c++) {
@@ -425,49 +363,51 @@ int static_exchange_evaluation(Position* pos, Move* move) {
 
     occupied &= ~(1ULL << move->from);
 
-    Bitboard white_attackers = get_attackers_of_square(pos, target_square, WHITE, occupied);
-    Bitboard black_attackers = get_attackers_of_square(pos, target_square, BLACK, occupied);
+    gain[0] = see_values[move->captured];
+    PieceType piece_on_target = move->piece;
 
-    PieceType attacking_piece = move->piece;
-    Color side = 1 - side_to_move;
+    if (move->promotion != EMPTY && move->promotion <= KING) {
+        gain[0] += see_values[move->promotion] - see_values[PAWN];
+        piece_on_target = move->promotion;
+    }
 
-    while ((side == WHITE ? white_attackers : black_attackers) != 0) {
+    if (move->is_en_passant) {
+        int captured_square = (pos->to_move == WHITE) ? target_square - 8 : target_square + 8;
+        if (captured_square >= 0 && captured_square < 64) {
+            occupied &= ~(1ULL << captured_square);
+        }
+        gain[0] = see_values[PAWN];
+    }
+
+    Color side = 1 - pos->to_move;
+
+    while (depth < 32) {
         depth++;
-        if (depth >= 31) break;
 
-        PieceType piece_type;
-        Bitboard current_attackers = (side == WHITE) ? white_attackers : black_attackers;
-        int attacker_square = get_least_valuable_attacker(pos, current_attackers, side, &piece_type);
+        gain[depth] = see_values[piece_on_target] - gain[depth - 1];
 
-        if (attacker_square == -1) break;
+        Bitboard attackers = (get_attackers_of_square(pos, target_square, WHITE, occupied) |
+                              get_attackers_of_square(pos, target_square, BLACK, occupied)) & occupied;
+
+        PieceType attacker_type = EMPTY;
+        int attacker_square = get_least_valuable_attacker(pos, attackers, side, &attacker_type);
+        if (attacker_square < 0) {
+            break;
+        }
+
+        if (attacker_type == KING) {
+            Bitboard enemy_attackers = 0;
+            for (int p = 0; p < 6; p++) {
+                enemy_attackers |= (attackers & pos->pieces[1 - side][p]);
+            }
+            if (enemy_attackers != 0) {
+                break;
+            }
+        }
 
         occupied &= ~(1ULL << attacker_square);
-        if (side == WHITE) {
-            white_attackers &= ~(1ULL << attacker_square);
-        } else {
-            black_attackers &= ~(1ULL << attacker_square);
-        }
-
-        gain[depth] = see_values[attacking_piece] - gain[depth - 1];
-
-        if (piece_type == ROOK || piece_type == QUEEN) {
-            Bitboard new_rook_attackers = get_rook_attacks_public(target_square, occupied);
-            white_attackers |= (new_rook_attackers & (pos->pieces[WHITE][ROOK] | pos->pieces[WHITE][QUEEN]));
-            black_attackers |= (new_rook_attackers & (pos->pieces[BLACK][ROOK] | pos->pieces[BLACK][QUEEN]));
-        }
-        if (piece_type == BISHOP || piece_type == QUEEN) {
-            Bitboard new_bishop_attackers = get_bishop_attacks_public(target_square, occupied);
-            white_attackers |= (new_bishop_attackers & (pos->pieces[WHITE][BISHOP] | pos->pieces[WHITE][QUEEN]));
-            black_attackers |= (new_bishop_attackers & (pos->pieces[BLACK][BISHOP] | pos->pieces[BLACK][QUEEN]));
-        }
-
-        attacking_piece = piece_type;
-
+        piece_on_target = attacker_type;
         side = 1 - side;
-
-        if (-gain[depth - 1] < gain[depth]) {
-            gain[depth] = -gain[depth - 1];
-        }
     }
 
     while (--depth > 0) {
@@ -490,6 +430,26 @@ bool see_is_good_capture(Position* pos, Move* move) {
     printf("Halfmove: %d\n", pos->halfmove_clock);
     printf("Fullmove: %d\n", pos->fullmove_number);
     printf("\n");
+}
+
+void trim_uci_line(char* line) {
+    if (!line) return;
+
+    size_t cut = strcspn(line, "\r\n");
+    line[cut] = '\0';
+
+    size_t len = cut;
+    while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t')) {
+        line[--len] = '\0';
+    }
+
+    size_t start = 0;
+    while (line[start] == ' ' || line[start] == '\t') {
+        start++;
+    }
+    if (start > 0) {
+        memmove(line, line + start, len - start + 1);
+    }
 }
 
 char* square_to_string(int square) {

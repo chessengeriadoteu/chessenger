@@ -48,6 +48,7 @@ static int evaluate_piece_square_tables_advanced(Position* pos) {
 
     int score = 0;
     GamePhase phase = detect_game_phase(pos);
+    const int p256 = game_phase_256(pos);
 
     for (Color color = WHITE; color <= BLACK; color++) {
         int color_multiplier = (color == WHITE) ? 1 : -1;
@@ -59,8 +60,10 @@ static int evaluate_piece_square_tables_advanced(Position* pos) {
 
             while (pieces) {
                 int square = get_lsb(pieces);
-                int pst_square = (color == WHITE) ? square : (square ^ 56);
-                color_pst += pst_table[pst_square];
+                int pst_square = (color == WHITE) ? (square ^ 56) : square;
+
+                color_pst += (piece == KING) ? king_pst_tapered(pst_square, p256)
+                                             : pst_table[pst_square];
                 pop_lsb(&pieces);
             }
         }
@@ -84,22 +87,18 @@ static int evaluate_center_control_advanced(Position* pos) {
 
         Bitboard pawns = pos->pieces[color][PAWN];
         while (pawns) {
-            int square = get_lsb(pawns);
 
-            Bitboard pawn_attacks = 0;
-            int file = square % 8;
-            if (color == WHITE) {
-                if (file > 0) pawn_attacks |= (1ULL << (square + 7));
-                if (file < 7) pawn_attacks |= (1ULL << (square + 9));
-            } else {
-                if (file > 0) pawn_attacks |= (1ULL << (square - 9));
-                if (file < 7) pawn_attacks |= (1ULL << (square - 7));
-            }
+            Bitboard pawn = 1ULL << get_lsb(pawns);
+            Bitboard pawn_attacks = (color == WHITE)
+                ? (((pawn & ~file_masks[0]) << 7) | ((pawn & ~file_masks[7]) << 9))
+                : (((pawn & ~file_masks[0]) >> 9) | ((pawn & ~file_masks[7]) >> 7));
             center_control += __builtin_popcountll(pawn_attacks & center_squares);
             pop_lsb(&pawns);
         }
 
-        for (PieceType piece = KNIGHT; piece <= QUEEN; piece++) {
+        static const PieceType center_pieces[4] = { KNIGHT, BISHOP, ROOK, QUEEN };
+        for (int pi = 0; pi < 4; pi++) {
+            PieceType piece = center_pieces[pi];
             Bitboard pieces = pos->pieces[color][piece];
             while (pieces) {
                 int square = get_lsb(pieces);
@@ -222,14 +221,6 @@ static int evaluate_piece_activity_enhanced(Position* pos) {
             pop_lsb(&rooks);
         }
 
-        Bitboard bishops = pos->pieces[color][BISHOP];
-        while (bishops) {
-            int square = get_lsb(bishops);
-            Bitboard attacks = get_bishop_attacks_public(square, pos->all_pieces);
-            int mobility = __builtin_popcountll(attacks & ~pos->occupied[color]);
-            score += color_multiplier * mobility * BISHOP_MOBILITY_BONUS;
-            pop_lsb(&bishops);
-        }
     }
 
     return score;
@@ -256,23 +247,48 @@ static int evaluate_pins_and_forks(Position* pos) {
             pop_lsb(&knights);
         }
 
-        Bitboard sliding_pieces = pos->pieces[color][BISHOP] | pos->pieces[color][ROOK] | pos->pieces[color][QUEEN];
-        int enemy_king_square = get_lsb(pos->pieces[enemy_color][KING]);
+        Bitboard enemy_king_bb = pos->pieces[enemy_color][KING];
+        if (!enemy_king_bb) continue;
+        int enemy_king_square = get_lsb(enemy_king_bb);
 
-        while (sliding_pieces) {
-            int square = get_lsb(sliding_pieces);
+        Bitboard king_bit = 1ULL << enemy_king_square;
+        Bitboard occ = pos->all_pieces;
+        Bitboard enemy_occ = pos->occupied[enemy_color];
 
-            if (get_bishop_attacks_public(square, pos->all_pieces) & (1ULL << enemy_king_square)) {
+        Bitboard diag_sliders = pos->pieces[color][BISHOP] | pos->pieces[color][QUEEN];
+        while (diag_sliders) {
+            int square = get_lsb(diag_sliders);
+            pop_lsb(&diag_sliders);
 
-                score += color_multiplier * (PIN_BONUS / 2);
+            Bitboard direct = get_bishop_attacks_public(square, occ);
+            if (direct & king_bit) continue;
+            Bitboard candidates = direct & enemy_occ;
+            while (candidates) {
+                int blocker = get_lsb(candidates);
+                pop_lsb(&candidates);
+                if (get_bishop_attacks_public(square, occ ^ (1ULL << blocker)) & king_bit) {
+                    score += color_multiplier * (PIN_BONUS / 2);
+                    break;
+                }
             }
+        }
 
-            if (get_rook_attacks_public(square, pos->all_pieces) & (1ULL << enemy_king_square)) {
+        Bitboard line_sliders = pos->pieces[color][ROOK] | pos->pieces[color][QUEEN];
+        while (line_sliders) {
+            int square = get_lsb(line_sliders);
+            pop_lsb(&line_sliders);
 
-                score += color_multiplier * (PIN_BONUS / 2);
+            Bitboard direct = get_rook_attacks_public(square, occ);
+            if (direct & king_bit) continue;
+            Bitboard candidates = direct & enemy_occ;
+            while (candidates) {
+                int blocker = get_lsb(candidates);
+                pop_lsb(&candidates);
+                if (get_rook_attacks_public(square, occ ^ (1ULL << blocker)) & king_bit) {
+                    score += color_multiplier * (PIN_BONUS / 2);
+                    break;
+                }
             }
-
-            pop_lsb(&sliding_pieces);
         }
     }
 
@@ -425,7 +441,7 @@ int evaluate_development_urgency(Position* pos) {
 int evaluate_anti_grabby_patterns(Position* pos) {
     if (!pos) return 0;
 
-    Bitboard edge_files = 0x8989818181818181ULL;
+    Bitboard edge_files = 0x8181818181818181ULL;
 
     int score = 0;
     if (pos->pieces[WHITE][QUEEN] & edge_files) score -= 60;
@@ -474,34 +490,55 @@ int evaluate_material_threats(Position* pos) {
     return score;
 }
 
+static Bitboard attacked_squares_of(Position* pos, Color color) {
+    Bitboard occ = pos->all_pieces;
+
+    Bitboard pawns = pos->pieces[color][PAWN];
+    Bitboard map = (color == WHITE)
+        ? (((pawns & ~file_masks[0]) << 7) | ((pawns & ~file_masks[7]) << 9))
+        : (((pawns & ~file_masks[0]) >> 9) | ((pawns & ~file_masks[7]) >> 7));
+
+    Bitboard b = pos->pieces[color][KNIGHT];
+    while (b) { map |= knight_attacks[get_lsb(b)]; pop_lsb(&b); }
+
+    b = pos->pieces[color][KING];
+    while (b) { map |= king_attacks[get_lsb(b)]; pop_lsb(&b); }
+
+    b = pos->pieces[color][ROOK] | pos->pieces[color][QUEEN];
+    while (b) { map |= get_rook_attacks_public(get_lsb(b), occ); pop_lsb(&b); }
+
+    b = pos->pieces[color][BISHOP] | pos->pieces[color][QUEEN];
+    while (b) { map |= get_bishop_attacks_public(get_lsb(b), occ); pop_lsb(&b); }
+
+    return map;
+}
+
 int evaluate_hung_pieces(Position* pos) {
     if (!pos) return 0;
 
     int score = 0;
 
+    Bitboard attacked_by[2];
+    attacked_by[WHITE] = attacked_squares_of(pos, WHITE);
+    attacked_by[BLACK] = attacked_squares_of(pos, BLACK);
+
     for (Color color = WHITE; color <= BLACK; color++) {
         int color_multiplier = (color == WHITE) ? 1 : -1;
+        Bitboard attacked_by_enemy = attacked_by[1 - color];
+        Bitboard defended_by_own   = attacked_by[color];
 
         for (PieceType piece_type = PAWN; piece_type <= KING; piece_type++) {
             Bitboard pieces = pos->pieces[color][piece_type];
 
             while (pieces) {
                 int square = get_lsb(pieces);
+                Bitboard square_bit = 1ULL << square;
 
-                bool is_attacked = is_square_attacked(pos, square, 1 - color);
+                bool is_attacked = (attacked_by_enemy & square_bit) != 0;
 
                 if (is_attacked) {
 
-                    Bitboard original_piece = pos->pieces[color][piece_type];
-                    pos->pieces[color][piece_type] &= ~(1ULL << square);
-                    pos->all_pieces &= ~(1ULL << square);
-                    pos->occupied[color] &= ~(1ULL << square);
-
-                    bool can_defend = is_square_attacked(pos, square, color);
-
-                    pos->pieces[color][piece_type] = original_piece;
-                    pos->all_pieces |= (1ULL << square);
-                    pos->occupied[color] |= (1ULL << square);
+                    bool can_defend = (defended_by_own & square_bit) != 0;
 
                     if (!can_defend) {
                         int piece_value = (piece_type == QUEEN) ? QUEEN_VALUE :
@@ -513,7 +550,7 @@ int evaluate_hung_pieces(Position* pos) {
                         int penalty = piece_value / 2;
                         score += color_multiplier * (-penalty);
 
-                        if (piece_type >= KNIGHT && detect_game_phase(pos) == PHASE_OPENING) {
+                        if (piece_type != PAWN && detect_game_phase(pos) == PHASE_OPENING) {
                             score += color_multiplier * (-100);
                         }
                     }
@@ -531,7 +568,9 @@ int evaluate_position(Position* pos) {
     if (!pos) return 0;
 
     GamePhase phase = detect_game_phase(pos);
-    EvaluationWeights weights = get_evaluation_weights(phase);
+    const int p256 = game_phase_256(pos);
+
+    EvaluationWeights weights = get_evaluation_weights_tapered(p256);
 
     int material = evaluate_material_count(pos);
     int pst = evaluate_piece_square_tables_advanced(pos);
@@ -544,7 +583,7 @@ int evaluate_position(Position* pos) {
     int piece_activity = evaluate_piece_activity_enhanced(pos);
     int pins_and_forks = evaluate_pins_and_forks(pos);
     int check_patterns = evaluate_check_patterns_enhanced(pos);
-    int development_urgency = evaluate_development_urgency(pos);
+
     int anti_grabby = evaluate_anti_grabby_patterns(pos);
     int hung_pieces = evaluate_hung_pieces(pos);
     int opening_principles = evaluate_opening_principles(pos);
@@ -554,7 +593,7 @@ int evaluate_position(Position* pos) {
     int weighted_pawns = (int)(pawns * weights.pawns);
     int weighted_king_safety = (int)(king_safety * weights.king_safety);
     int weighted_center = (int)(center_control * weights.center_control);
-    int weighted_development = (int)((development + development_urgency) * weights.development);
+    int weighted_development = (int)(development * weights.development);
     int weighted_mobility = (int)(mobility * weights.mobility);
     int weighted_activity = (int)((piece_activity + knight_outposts) * weights.piece_activity);
     int weighted_tactical = (int)((pins_and_forks + check_patterns) * weights.tactical);
@@ -577,7 +616,7 @@ int evaluate_position(Position* pos) {
         printf("DEBUG:   Pawns:         %+d (%.1fx) = %+d\n", pawns, weights.pawns, weighted_pawns);
         printf("DEBUG:   King Safety:   %+d (%.1fx) = %+d\n", king_safety, weights.king_safety, weighted_king_safety);
         printf("DEBUG:   Center:        %+d (%.1fx) = %+d\n", center_control, weights.center_control, weighted_center);
-        printf("DEBUG:   Development:   %+d (%.1fx) = %+d\n", development + development_urgency, weights.development, weighted_development);
+        printf("DEBUG:   Development:   %+d (%.1fx) = %+d\n", development, weights.development, weighted_development);
         printf("DEBUG:   Mobility:      %+d (%.1fx) = %+d\n", mobility, weights.mobility, weighted_mobility);
         printf("DEBUG:   Activity:      %+d (%.1fx) = %+d\n", piece_activity + knight_outposts, weights.piece_activity, weighted_activity);
         printf("DEBUG:   Tactical:      %+d (%.1fx) = %+d\n", pins_and_forks + check_patterns, weights.tactical, weighted_tactical);
@@ -634,7 +673,10 @@ static void debug_material_loss(void) {
     Position pos_before, pos_after;
 
     printf("1. POSITION BEFORE Na4 (after 1.Nf3 d5 2.Nc3 d4):\n");
-    parse_fen(&pos_before, "rnbqkbnr/ppp1pppp/8/8/3p4/2N2N2/PPPPPPPP/R1BQKB1R w KQkq - 0 3");
+    if (!parse_fen(&pos_before, "rnbqkbnr/ppp1pppp/8/8/3p4/2N2N2/PPPPPPPP/R1BQKB1R w KQkq - 0 3")) {
+        printf("   ERROR: %s - aborting debug\n", fen_last_error());
+        return;
+    }
 
     printf("   Material count test:\n");
     int material_before = evaluate_material_count(&pos_before);
@@ -647,7 +689,10 @@ static void debug_material_loss(void) {
     printf("   Final evaluation: %+d\n\n", eval_before);
 
     printf("2. POSITION AFTER Qxa4 (knight captured):\n");
-    parse_fen(&pos_after, "rnb1kbnr/ppp1pppp/8/8/q2p4/5N2/PPPPPPPP/R1BQKB1R w KQkq - 0 6");
+    if (!parse_fen(&pos_after, "rnb1kbnr/ppp1pppp/8/8/q2p4/5N2/PPPPPPPP/R1BQKB1R w KQkq - 0 6")) {
+        printf("   ERROR: %s - aborting debug\n", fen_last_error());
+        return;
+    }
 
     printf("   Material count test:\n");
     int material_after = evaluate_material_count(&pos_after);

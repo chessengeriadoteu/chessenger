@@ -17,6 +17,9 @@ Bitboard get_bishop_attacks_public(int square, Bitboard occupied);
 Bitboard get_rook_attacks_public(int square, Bitboard occupied);
 Bitboard get_queen_attacks_public(int square, Bitboard occupied);
 
+Bitboard ray_scan_rook_public(int square, Bitboard occupied);
+Bitboard ray_scan_bishop_public(int square, Bitboard occupied);
+
 bool is_square_attacked(Position* pos, int square, Color by_color);
 bool is_in_check(Position* pos, Color color);
 bool is_legal_move(Position* pos, Move* move);
@@ -33,15 +36,15 @@ int generate_moves(Position* pos, Move* moves);
 int generate_legal_moves(Position* pos, Move* moves);
 
 void score_moves(Move* moves, int move_count, Move hash_move);
-void score_moves_with_killers(Move* moves, int move_count, Move hash_move, int depth);
+void score_moves_with_killers(Move* moves, int move_count, Move hash_move, int ply);
 int compare_moves(const void* a, const void* b);
 
-bool is_killer_move(int depth, Move move);
+bool is_killer_move(int ply, Move move);
 
 void debug_en_passant_position(Position* pos);
 
-void score_moves_with_history(Move* moves, int move_count, Move hash_move, int depth);
-void score_moves_with_history_enhanced(Position* pos, Move* moves, int move_count, Move hash_move, int depth);
+void score_moves_with_history(Move* moves, int move_count, Move hash_move, int ply);
+void score_moves_with_history_enhanced(Position* pos, Move* moves, int move_count, Move hash_move, int ply);
 void score_moves_with_checks(Position* pos, Move* moves, int move_count, Move hash_move);
 
 #endif

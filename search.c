@@ -21,57 +21,6 @@ int win_stdin_ready(void);
 int win_stdin_read(int fd, void* buf, unsigned int count);
 #endif
 
-bool fast_gives_check(Position* pos, Move* move) {
-    if (!pos || !move) return false;
-
-    Color us = pos->to_move;
-    Color them = 1 - us;
-    PieceType piece = move->piece;
-    int to = move->to;
-
-    Bitboard enemy_king_bb = pos->pieces[them][KING];
-    if (enemy_king_bb == 0) return false;
-
-    int king_square = get_lsb(enemy_king_bb);
-    if (king_square < 0 || king_square > 63) return false;
-
-    Bitboard occupied_after = pos->all_pieces;
-    occupied_after &= ~(1ULL << move->from);
-    occupied_after |= (1ULL << to);
-
-    if (move->is_en_passant) {
-        int captured_pawn_square = (us == WHITE) ? to - 8 : to + 8;
-        occupied_after &= ~(1ULL << captured_pawn_square);
-    }
-
-    switch (piece) {
-        case PAWN: {
-            int rank_diff = (king_square / 8) - (to / 8);
-            int file_diff = (king_square % 8) - (to % 8);
-            if (file_diff < 0) file_diff = -file_diff;
-            if ((rank_diff == 1 || rank_diff == -1) && file_diff == 1) {
-                if ((us == WHITE && rank_diff == 1) || (us == BLACK && rank_diff == -1)) {
-                    return true;
-                }
-            }
-            break;
-        }
-        case KNIGHT:
-            return (knight_attacks[to] & (1ULL << king_square)) != 0;
-        case BISHOP:
-            return (get_bishop_attacks_public(to, occupied_after) & (1ULL << king_square)) != 0;
-        case ROOK:
-            return (get_rook_attacks_public(to, occupied_after) & (1ULL << king_square)) != 0;
-        case QUEEN:
-            return ((get_rook_attacks_public(to, occupied_after) | get_bishop_attacks_public(to, occupied_after)) & (1ULL << king_square)) != 0;
-        case KING:
-            return (king_attacks[to] & (1ULL << king_square)) != 0;
-        default:
-            return false;
-    }
-    return false;
-}
-
 #define FULL_MOVES_TO_SEARCH 3
 #define MIN_LMR_DEPTH 2
 #define CHECK_STOP_FREQUENCY 4096
@@ -79,51 +28,91 @@ bool fast_gives_check(Position* pos, Move* move) {
 #define NULL_MOVE_DEPTH_THRESHOLD 2
 #define NULL_MOVE_REDUCTION 3
 
-#define FUTILITY_MARGIN_1 150
-#define FUTILITY_MARGIN_2 250
-#define FUTILITY_MARGIN_3 400
-
 #define RAZOR_MARGIN 300
 #define RAZOR_DEPTH_LIMIT 3
 
 #define DELTA_MARGIN 900
 
-#define MAX_QUIESCENCE_DEPTH 8
+_Static_assert(MAX_MOVES == 256, "Move[256] literals in search.c assume MAX_MOVES==256");
 
-static const int futility_margin[4] = {0, FUTILITY_MARGIN_1, FUTILITY_MARGIN_2, FUTILITY_MARGIN_3};
-
-static bool stop_requested = false;
-static bool position_changed = false;
-static char pending_position_command[512] = "";
-static bool has_pending_position = false;
+static char pending_input[MAX_UCI_LINE * 2] = "";
+static bool has_pending_input = false;
 static int check_counter = 0;
+
+static bool root_search_interrupted = false;
+
+bool was_root_search_interrupted(void) {
+    return root_search_interrupted;
+}
+
+static char partial_line[MAX_UCI_LINE] = "";
+
+static bool partial_overflow = false;
 
 static long long search_time_limit_ms = 0;
 static struct timeval search_start_time;
+
+static bool search_unbounded = false;
+
+void set_search_unbounded(bool unbounded) {
+    search_unbounded = unbounded;
+}
 
 static int history_table[64][64];
 
 static Move killer_moves[MAX_DEPTH][2];
 
-static Move pv_table[MAX_DEPTH][MAX_DEPTH];
-static int pv_length[MAX_DEPTH];
+#define PV_MAX_PLY (MAX_DEPTH + 2)
+static Move pv_table[PV_MAX_PLY][PV_MAX_PLY];
+static int pv_length[PV_MAX_PLY];
 
 void reset_search_state(void) {
     stop_requested = false;
     position_changed = false;
-    has_pending_position = false;
-    pending_position_command[0] = '\0';
+    has_pending_input = false;
+    pending_input[0] = '\0';
+
+    search_unbounded = false;
+
+    partial_overflow = false;
 
 }
 
-bool get_pending_position_command(char* buffer, int buffer_size) {
-    if (has_pending_position) {
-        strncpy(buffer, pending_position_command, buffer_size - 1);
+bool get_pending_input(char* buffer, int buffer_size) {
+    if (has_pending_input) {
+        strncpy(buffer, pending_input, buffer_size - 1);
         buffer[buffer_size - 1] = '\0';
-        has_pending_position = false;
+        has_pending_input = false;
+        pending_input[0] = '\0';
         return true;
     }
     return false;
+}
+
+bool take_partial_input(char* buffer, int buffer_size) {
+    if (partial_line[0] == '\0' || buffer_size <= 0) return false;
+    strncpy(buffer, partial_line, buffer_size - 1);
+    buffer[buffer_size - 1] = '\0';
+    partial_line[0] = '\0';
+    return true;
+}
+
+static bool queue_pending_line(const char* line) {
+    size_t used = strlen(pending_input);
+    size_t len  = strlen(line);
+
+    if (used + len + 2 > sizeof(pending_input)) {
+
+        printf("info string ERROR: pending input queue full; command dropped: %.40s\n", line);
+        fflush(stdout);
+        return false;
+    }
+
+    memcpy(pending_input + used, line, len);
+    pending_input[used + len] = '\n';
+    pending_input[used + len + 1] = '\0';
+    has_pending_input = true;
+    return true;
 }
 
 void set_search_time_limit(long long time_limit_ms) {
@@ -148,9 +137,9 @@ void init_search(void) {
     init_history();
     clear_killers();
 
-    for (int i = 0; i < MAX_DEPTH; i++) {
+    for (int i = 0; i < PV_MAX_PLY; i++) {
         pv_length[i] = 0;
-        for (int j = 0; j < MAX_DEPTH; j++) {
+        for (int j = 0; j < PV_MAX_PLY; j++) {
             pv_table[i][j] = (Move){0};
         }
     }
@@ -163,25 +152,25 @@ void clear_killers(void) {
     }
 }
 
-void store_killer(int depth, Move move) {
-    if (depth >= 0 && depth < MAX_DEPTH) {
+void store_killer(int ply, Move move) {
+    if (ply >= 0 && ply < MAX_DEPTH) {
 
-        if (killer_moves[depth][0].from == move.from &&
-            killer_moves[depth][0].to == move.to) {
+        if (killer_moves[ply][0].from == move.from &&
+            killer_moves[ply][0].to == move.to) {
             return;
         }
 
-        killer_moves[depth][1] = killer_moves[depth][0];
-        killer_moves[depth][0] = move;
+        killer_moves[ply][1] = killer_moves[ply][0];
+        killer_moves[ply][0] = move;
     }
 }
 
-bool is_killer_move(int depth, Move move) {
-    if (depth >= 0 && depth < MAX_DEPTH) {
-        return (killer_moves[depth][0].from == move.from &&
-                killer_moves[depth][0].to == move.to) ||
-               (killer_moves[depth][1].from == move.from &&
-                killer_moves[depth][1].to == move.to);
+bool is_killer_move(int ply, Move move) {
+    if (ply >= 0 && ply < MAX_DEPTH) {
+        return (killer_moves[ply][0].from == move.from &&
+                killer_moves[ply][0].to == move.to) ||
+               (killer_moves[ply][1].from == move.from &&
+                killer_moves[ply][1].to == move.to);
     }
     return false;
 }
@@ -229,24 +218,6 @@ void age_history(void) {
     }
 }
 
-int see_capture(Position* pos, Move* move) {
-    if (move->captured == EMPTY) {
-        return 0;
-    }
-
-    int captured_value = piece_value(move->captured);
-
-    int attacking_piece_value = piece_value(move->piece);
-
-    int see_score = captured_value - attacking_piece_value;
-
-    if (move->piece == PAWN && see_score >= 0) {
-        see_score += 50;
-    }
-
-    return see_score;
-}
-
 bool gives_check(Position* pos, Move* move) {
 
     UndoInfo undo;
@@ -268,12 +239,10 @@ int piece_value(int piece) {
     }
 }
 
-int quiescence_search(Position* pos, int alpha, int beta, int ply, SearchInfo* info) {
-    info->nodes++;
+#define QS_CHECK_PLIES 2
 
-    if (ply >= MAX_QUIESCENCE_DEPTH) {
-        return evaluate_position(pos);
-    }
+int quiescence_search(Position* pos, int alpha, int beta, int ply, int qply, SearchInfo* info) {
+    info->nodes++;
 
     if (ply > info->seldepth) {
         info->seldepth = ply;
@@ -283,75 +252,77 @@ int quiescence_search(Position* pos, int alpha, int beta, int ply, SearchInfo* i
         return alpha;
     }
 
-    int stand_pat = evaluate_position(pos);
-
-    if (stand_pat >= beta) {
-        return beta;
+    if (qply >= MAX_QUIESCENCE_DEPTH) {
+        return evaluate_position(pos);
     }
 
-    if (stand_pat + DELTA_MARGIN < alpha) {
-        return alpha;
+    bool in_check = is_in_check(pos, pos->to_move);
+
+    if (!in_check) {
+        int stand_pat = evaluate_position(pos);
+
+        if (stand_pat >= beta) {
+            return beta;
+        }
+
+        if (stand_pat + DELTA_MARGIN < alpha) {
+            return alpha;
+        }
+
+        if (stand_pat > alpha) {
+            alpha = stand_pat;
+        }
     }
 
-    if (stand_pat > alpha) {
-        alpha = stand_pat;
+    Move all_moves[256];
+    int all_count = generate_legal_moves(pos, all_moves);
+
+    if (all_count == 0) {
+
+        return in_check ? (-MATE_SCORE + ply) : 0;
     }
 
     Move tactical_moves[256];
     int tactical_count = 0;
 
-    Move all_moves[256];
-    int all_count = generate_legal_moves(pos, all_moves);
-
-    bool is_check = false;
     for (int i = 0; i < all_count; i++) {
-        bool is_capture = (all_moves[i].captured != EMPTY || all_moves[i].promotion != EMPTY);
+        bool is_capture   = (all_moves[i].captured != EMPTY);
+        bool is_promotion = (all_moves[i].promotion != EMPTY);
 
-        if (ply <= 4) {
-            is_check = fast_gives_check(pos, &all_moves[i]);
-        } else if (ply <= 6 && stand_pat + 200 >= alpha) {
+        bool is_check = false;
+        if (!in_check && !is_capture && !is_promotion && qply < QS_CHECK_PLIES) {
 
-            is_check = fast_gives_check(pos, &all_moves[i]);
+            is_check = gives_check(pos, &all_moves[i]);
         }
 
-        if (ply <= 4) {
-            is_check = fast_gives_check(pos, &all_moves[i]);
-        } else if (ply <= 6 && stand_pat + 200 >= alpha) {
-
-            is_check = fast_gives_check(pos, &all_moves[i]);
+        if (!in_check && !is_capture && !is_promotion && !is_check) {
+            continue;
         }
 
-        if (ply <= 4) {
-            is_check = fast_gives_check(pos, &all_moves[i]);
-        }
+        Move m = all_moves[i];
 
-                if (is_capture || is_check) {
-            tactical_moves[tactical_count++] = all_moves[i];
-        }
-        if (all_moves[i].captured != EMPTY || all_moves[i].promotion != EMPTY) {
-            tactical_moves[tactical_count++] = all_moves[i];
-        }
-    }
+        if (is_capture) {
 
-    for (int i = 0; i < tactical_count; i++) {
-        if (tactical_moves[i].captured != EMPTY) {
+            m.score = static_exchange_evaluation(pos, &m);
 
-            tactical_moves[i].score = see_capture(pos, &tactical_moves[i]);
-
-            if (tactical_moves[i].score > 0) {
-                tactical_moves[i].score += 1000;
+            if (!in_check && m.score < 0) {
+                continue;
             }
+
+            if (m.score > 0) {
+                m.score += 1000;
+            }
+        } else if (is_check) {
+            m.score = 200 + (qply == 0 ? 50 : 30);
         } else {
-
-            if (is_check) {
-
-                tactical_moves[i].score = 200 + (ply <= 2 ? 50 : ply <= 4 ? 30 : 10);
-            }
+            m.score = 0;
         }
 
-        if (tactical_moves[i].promotion != EMPTY) {
-            tactical_moves[i].score += piece_value(tactical_moves[i].promotion);
+        if (is_promotion && !is_capture) {
+            m.score += piece_value(m.promotion);
         }
+
+        tactical_moves[tactical_count++] = m;
     }
 
     for (int i = 0; i < tactical_count - 1; i++) {
@@ -368,7 +339,7 @@ int quiescence_search(Position* pos, int alpha, int beta, int ply, SearchInfo* i
         UndoInfo undo;
         make_move_full(pos, &tactical_moves[i], &undo);
 
-        int score = -quiescence_search(pos, -beta, -alpha, ply + 1, info);
+        int score = -quiescence_search(pos, -beta, -alpha, ply + 1, qply + 1, info);
 
         undo_move_full(pos, &tactical_moves[i], &undo);
 
@@ -385,21 +356,13 @@ int quiescence_search(Position* pos, int alpha, int beta, int ply, SearchInfo* i
         }
     }
 
-    if (tactical_count == 0 && is_in_check(pos, pos->to_move)) {
-
-        if (all_count == 0) {
-
-            return -MATE_SCORE + ply;
-        }
-    }
-
     return alpha;
 }
 
 int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, SearchInfo* info) {
     info->nodes++;
 
-    pv_length[ply] = ply;
+    if (ply < PV_MAX_PLY) pv_length[ply] = ply;
 
     if (ply > info->seldepth) {
         info->seldepth = ply;
@@ -416,13 +379,25 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
     bool in_check = is_in_check(pos, pos->to_move);
 
     if (depth <= 0) {
-        return quiescence_search(pos, alpha, beta, ply, info);
+        return quiescence_search(pos, alpha, beta, ply, 0, info);
+    }
+
+    uint64_t tt_key = compute_hash(pos);
+
+    Move tt_move = {0};
+    {
+        int tt_score;
+
+        if (probe_hash(&main_tt, tt_key, depth, alpha, beta, &tt_score, &tt_move, ply)
+            && beta - alpha == 1) {
+            return tt_score;
+        }
     }
 
     if (depth <= RAZOR_DEPTH_LIMIT && !in_check && ply > 0) {
         int static_eval = evaluate_position(pos);
         if (static_eval + RAZOR_MARGIN <= alpha) {
-            int razor_score = quiescence_search(pos, alpha, beta, ply, info);
+            int razor_score = quiescence_search(pos, alpha, beta, ply, 0, info);
             if (razor_score <= alpha) {
                 return razor_score;
             }
@@ -456,14 +431,6 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
         }
     }
 
-    if (depth <= 3 && depth > 0 && !in_check && ply > 0) {
-        int static_eval = evaluate_position(pos);
-        int margin = futility_margin[depth];
-        if (static_eval + margin <= alpha) {
-            return static_eval;
-        }
-    }
-
     if (depth <= 2 && !in_check && ply > 0) {
         int static_eval = evaluate_position(pos);
         int reverse_margin = 200 * depth;
@@ -475,28 +442,29 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
     int move_count = generate_legal_moves(pos, moves);
 
     if (move_count == 0) {
+
+        Move no_move = {0};
         if (in_check) {
-            return -30000 + ply;
+
+            int mate_score = -MATE_SCORE + ply;
+            store_hash(&main_tt, tt_key, depth, mate_score, HASH_EXACT, no_move, ply);
+            return mate_score;
         } else {
+            store_hash(&main_tt, tt_key, depth, 0, HASH_EXACT, no_move, ply);
             return 0;
         }
     }
 
-    Move null_move = {0};
-    score_moves_with_history_enhanced(pos, moves, move_count, null_move, depth);
+    score_moves_with_history_enhanced(pos, moves, move_count, tt_move, ply);
+    qsort(moves, move_count, sizeof(Move), compare_moves);
 
     int best_score = -31000;
     bool found_pv = false;
 
+    Move tt_best_move = {0};
+
     for (int i = 0; i < move_count; i++) {
         Move* move = &moves[i];
-
-                if (move->captured != EMPTY && depth <= 3) {
-                    int see_value = see_capture(pos, move);
-                    if (see_value < -100) {
-                        continue;
-                    }
-                }
 
         UndoInfo undo;
         make_move_full(pos, move, &undo);
@@ -527,7 +495,7 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
                     return alpha;
                 }
 
-                if (score > alpha && score < beta && found_pv) {
+                if (score > alpha && score < beta) {
                     score = -negamax_with_pv(pos, depth - 1, -beta, -alpha, ply + 1, info);
 
                     if (fast_check_stop()) {
@@ -557,18 +525,23 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
 
         if (score > best_score) {
             best_score = score;
+            tt_best_move = *move;
 
-            pv_table[ply][ply] = *move;
-            for (int j = ply + 1; j < pv_length[ply + 1]; j++) {
-                pv_table[ply][j] = pv_table[ply + 1][j];
+            if (ply + 1 < PV_MAX_PLY) {
+                pv_table[ply][ply] = *move;
+                for (int j = ply + 1; j < pv_length[ply + 1] && j < PV_MAX_PLY; j++) {
+                    pv_table[ply][j] = pv_table[ply + 1][j];
+                }
+                pv_length[ply] = pv_length[ply + 1];
             }
-            pv_length[ply] = pv_length[ply + 1];
 
             if (score >= beta) {
                 if (move->captured == EMPTY && move->promotion == EMPTY) {
                     store_killer(ply, *move);
                     update_history(*move, depth, true);
                 }
+
+                store_hash(&main_tt, tt_key, depth, beta, HASH_BETA, *move, ply);
                 return beta;
             }
             if (score > alpha) {
@@ -586,22 +559,34 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
         }
     }
 
+    store_hash(&main_tt, tt_key, depth, found_pv ? best_score : alpha,
+               found_pv ? HASH_EXACT : HASH_ALPHA, tt_best_move, ply);
+
     return best_score;
 }
 
-Move search_single_depth_with_nodes(Position* pos, int depth, int alpha, SearchInfo* info) {
-    int beta = (alpha > -500) ? alpha + 100 : 1000;
-
+Move search_single_depth_with_nodes(Position* pos, int depth, int alpha, int beta, SearchInfo* info) {
     Move moves[256];
     int move_count = generate_legal_moves(pos, moves);
 
+    root_search_interrupted = false;
+
     if (move_count == 0) {
         Move null_move = {0};
+
+        info->score = is_in_check(pos, pos->to_move) ? -30000 : 0;
         return null_move;
     }
 
-    Move null_move = {0};
-    score_moves_with_history_enhanced(pos, moves, move_count, null_move, depth);
+    Move tt_move = {0};
+    {
+        int tt_score_root;
+        uint64_t root_key = compute_hash(pos);
+        (void)probe_hash(&main_tt, root_key, depth, alpha, beta, &tt_score_root, &tt_move, 0);
+    }
+
+    score_moves_with_history_enhanced(pos, moves, move_count, tt_move, 0);
+    qsort(moves, move_count, sizeof(Move), compare_moves);
 
     Move best_move = moves[0];
     int best_score = -31000;
@@ -611,19 +596,17 @@ Move search_single_depth_with_nodes(Position* pos, int depth, int alpha, SearchI
     for (int i = 0; i < move_count; i++) {
         Move* move = &moves[i];
 
-                if (move->captured != EMPTY && depth <= 3) {
-                    int see_value = see_capture(pos, move);
-                    if (see_value < -100) {
-                        continue;
-                    }
-                }
-
         UndoInfo undo;
         make_move_full(pos, move, &undo);
 
         int score = -negamax_with_pv(pos, depth - 1, -beta, -alpha, 1, info);
 
         undo_move_full(pos, move, &undo);
+
+        if (fast_check_stop()) {
+            root_search_interrupted = true;
+            break;
+        }
 
         if (score > best_score) {
             best_score = score;
@@ -655,6 +638,100 @@ Move search_single_depth_with_nodes(Position* pos, int depth, int alpha, SearchI
     return best_move;
 }
 
+static void handle_line_during_search(char* line, bool* abort_now) {
+    while (*line == ' ' || *line == '\t' || *line == '\r') line++;
+    size_t len = strlen(line);
+    while (len > 0 && (line[len-1] == ' ' || line[len-1] == '\r')) line[--len] = '\0';
+    if (len == 0) return;
+
+    if (strncmp(line, "isready", 7) == 0) {
+
+        printf("readyok\n");
+        fflush(stdout);
+    } else if (strncmp(line, "quit", 4) == 0) {
+
+        printf("info string quit received during search; search aborted\n");
+        fflush(stdout);
+        stop_requested = true;
+        *abort_now = true;
+        if (!queue_pending_line(line)) {
+            quit_requested = true;
+        }
+    } else if (strncmp(line, "stop", 4) == 0) {
+        stop_requested = true;
+        *abort_now = true;
+    } else if (strncmp(line, "position", 8) == 0) {
+        position_changed = true;
+        stop_requested = true;
+        *abort_now = true;
+        queue_pending_line(line);
+    } else {
+
+        queue_pending_line(line);
+    }
+}
+
+static void consume_input_chunk(const char* chunk, bool* abort_now) {
+    const char* p = chunk;
+
+    if (partial_overflow) {
+        const char* nl = strchr(p, '\n');
+        if (!nl) return;
+        partial_overflow = false;
+        p = nl + 1;
+    }
+
+    while (*p) {
+        const char* nl = strchr(p, '\n');
+        size_t seg = nl ? (size_t)(nl - p) + 1 : strlen(p);
+        size_t used = strlen(partial_line);
+
+        if (used + seg >= sizeof(partial_line)) {
+            printf("info string ERROR: UCI input line longer than %d bytes; line dropped\n",
+                   (int)sizeof(partial_line) - 1);
+            fflush(stdout);
+            partial_line[0] = '\0';
+            partial_overflow = (nl == NULL);
+            p += seg;
+            continue;
+        }
+
+        memcpy(partial_line + used, p, seg);
+        partial_line[used + seg] = '\0';
+        p += seg;
+
+        if (nl) {
+            partial_line[used + seg - 1] = '\0';
+            handle_line_during_search(partial_line, abort_now);
+            partial_line[0] = '\0';
+        }
+    }
+}
+
+static size_t drop_nul_lines(char* buf, size_t len, size_t* dropped) {
+    size_t out = 0, i = 0;
+    *dropped = 0;
+
+    while (i < len) {
+        size_t start = i;
+        bool has_nul = false;
+        while (i < len && buf[i] != '\n') {
+            if (buf[i] == '\0') has_nul = true;
+            i++;
+        }
+        size_t seg_end = (i < len) ? i + 1 : i;
+        if (has_nul) {
+            (*dropped)++;
+        } else {
+            if (out != start) memmove(buf + out, buf + start, seg_end - start);
+            out += seg_end - start;
+        }
+        i = seg_end;
+    }
+    buf[out] = '\0';
+    return out;
+}
+
 bool fast_check_stop(void) {
     check_counter++;
     if (check_counter < CHECK_STOP_FREQUENCY) {
@@ -675,29 +752,31 @@ bool fast_check_stop(void) {
         fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
 #endif
 
-        char buffer[256];
+        static char chunk[MAX_UCI_LINE];
+        ssize_t bytes_read;
 #ifdef _WIN32
-        ssize_t bytes_read = win_stdin_read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
+        while ((bytes_read = win_stdin_read(STDIN_FILENO, chunk, sizeof(chunk) - 1)) > 0) {
 #else
-        ssize_t bytes_read = read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
+        while ((bytes_read = read(STDIN_FILENO, chunk, sizeof(chunk) - 1)) > 0) {
 #endif
+            chunk[bytes_read] = '\0';
 
-        if (bytes_read > 0) {
-            buffer[bytes_read] = '\0';
-
-            if (strstr(buffer, "stop") || strstr(buffer, "quit")) {
-                stop_requested = true;
-                abort_now = true;
+            if (memchr(chunk, '\0', (size_t)bytes_read) != NULL) {
+                size_t dropped = 0;
+                drop_nul_lines(chunk, (size_t)bytes_read, &dropped);
+                printf("info string ERROR: NUL byte in UCI input; %zu line(s) dropped\n",
+                       dropped);
+                fflush(stdout);
             }
-            else if (strstr(buffer, "position")) {
-                position_changed = true;
-                stop_requested = true;
-                abort_now = true;
 
-                strncpy(pending_position_command, buffer, sizeof(pending_position_command) - 1);
-                pending_position_command[sizeof(pending_position_command) - 1] = '\0';
-                has_pending_position = true;
-            }
+            consume_input_chunk(chunk, &abort_now);
+
+            if (abort_now) break;
+        }
+
+        if (bytes_read == 0 && search_unbounded) {
+            stop_requested = true;
+            abort_now = true;
         }
 
 #ifndef _WIN32
@@ -705,7 +784,7 @@ bool fast_check_stop(void) {
 #endif
     }
 
-    return abort_now;
+    return abort_now || stop_requested;
 }
 
 bool check_time(SearchInfo* info) {

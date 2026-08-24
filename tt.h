@@ -40,8 +40,9 @@ void clear_tt(TranspositionTable* tt);
 void free_tt(TranspositionTable* tt);
 
 uint64_t compute_hash(Position* pos);
-void store_hash(TranspositionTable* tt, uint64_t key, int depth, int score, HashFlag flag, Move best_move);
-bool probe_hash(TranspositionTable* tt, uint64_t key, int depth, int alpha, int beta, int* score, Move* best_move);
+
+void store_hash(TranspositionTable* tt, uint64_t key, int depth, int score, HashFlag flag, Move best_move, int ply);
+bool probe_hash(TranspositionTable* tt, uint64_t key, int depth, int alpha, int beta, int* score, Move* best_move, int ply);
 
 extern TranspositionTable main_tt;
 

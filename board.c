@@ -71,45 +71,79 @@ void setup_starting_position(Position* pos) {
     pos->fullmove_number = 1;
 
     pos->history_count = 0;
-    pos->history_start = 0;
+    pos->history_base = 0;
     memset(pos->position_history, 0, sizeof(pos->position_history));
 }
 
-void parse_fen(Position* pos, const char* fen) {
-    memset(pos, 0, sizeof(Position));
+static char fen_error_msg[160] = "";
+
+const char* fen_last_error(void) {
+    return fen_error_msg;
+}
+
+static bool fen_fail(const char* reason) {
+    snprintf(fen_error_msg, sizeof(fen_error_msg), "%s", reason);
+    return false;
+}
+
+static bool parse_fen_uint(const char* s, long* out) {
+    if (!s || !*s) return false;
+    long value = 0;
+    for (int i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return false;
+        if (value > 1000000) return false;
+        value = value * 10 + (s[i] - '0');
+    }
+    *out = value;
+    return true;
+}
+
+bool parse_fen(Position* pos, const char* fen) {
+    if (!pos) return fen_fail("internal: null position");
+    if (!fen) return fen_fail("empty FEN");
 
     char fen_copy[256];
-    strncpy(fen_copy, fen, sizeof(fen_copy) - 1);
-    fen_copy[sizeof(fen_copy) - 1] = '\0';
+    if (strlen(fen) >= sizeof(fen_copy)) {
+
+        return fen_fail("FEN too long");
+    }
+    strcpy(fen_copy, fen);
+
+    Position tmp;
+    memset(&tmp, 0, sizeof(Position));
 
     char* tokens[6];
     int token_count = 0;
 
-    char* token = strtok(fen_copy, " ");
+    char* token = strtok(fen_copy, " \t");
     while (token && token_count < 6) {
         tokens[token_count++] = token;
-        token = strtok(NULL, " ");
+        token = strtok(NULL, " \t");
     }
 
     if (token_count < 4) {
-        return;
+
+        return fen_fail("FEN needs at least 4 fields (board, side, castling, en passant)");
     }
 
-    int square = 56;
+    int rank = 7;
+    int file = 0;
     for (int i = 0; tokens[0][i]; i++) {
         char c = tokens[0][i];
 
         if (c == '/') {
-            square -= 16;
+            if (file != 8) return fen_fail("FEN board: rank does not add up to 8 squares");
+            if (rank == 0) return fen_fail("FEN board: more than 8 ranks");
+            rank--;
+            file = 0;
         } else if (c >= '1' && c <= '8') {
-            int empty_squares = c - '0';
-            square += empty_squares;
+            file += c - '0';
+            if (file > 8) return fen_fail("FEN board: rank overflows 8 squares");
         } else {
             Color color = (c >= 'A' && c <= 'Z') ? WHITE : BLACK;
-            c = tolower(c);
 
             PieceType piece_type;
-            switch (c) {
+            switch (tolower((unsigned char)c)) {
                 case 'p': piece_type = PAWN; break;
                 case 'r': piece_type = ROOK; break;
                 case 'n': piece_type = KNIGHT; break;
@@ -117,51 +151,91 @@ void parse_fen(Position* pos, const char* fen) {
                 case 'q': piece_type = QUEEN; break;
                 case 'k': piece_type = KING; break;
                 default:
-                    square++;
-                    continue;
+
+                    return fen_fail("FEN board: unknown piece letter");
             }
 
-            pos->pieces[color][piece_type] |= 1ULL << square;
-            pos->occupied[color] |= 1ULL << square;
-            square++;
+            if (file > 7) return fen_fail("FEN board: rank overflows 8 squares");
+
+            int square = rank * 8 + file;
+            tmp.pieces[color][piece_type] |= 1ULL << square;
+            tmp.occupied[color] |= 1ULL << square;
+            file++;
         }
     }
+    if (rank != 0 || file != 8) {
+        return fen_fail("FEN board: must be exactly 8 ranks of 8 squares");
+    }
 
-    pos->all_pieces = pos->occupied[WHITE] | pos->occupied[BLACK];
+    tmp.all_pieces = tmp.occupied[WHITE] | tmp.occupied[BLACK];
 
-    pos->to_move = (tokens[1][0] == 'w') ? WHITE : BLACK;
+    if (tokens[1][1] != '\0' || (tokens[1][0] != 'w' && tokens[1][0] != 'b')) {
+        return fen_fail("FEN side to move must be 'w' or 'b'");
+    }
+    tmp.to_move = (tokens[1][0] == 'w') ? WHITE : BLACK;
 
-    pos->castling_rights = 0;
-    if (tokens[2][0] != '-') {
+    tmp.castling_rights = 0;
+    if (!(tokens[2][0] == '-' && tokens[2][1] == '\0')) {
         for (int i = 0; tokens[2][i]; i++) {
+            int bit;
             switch (tokens[2][i]) {
-                case 'K': pos->castling_rights |= WHITE_KINGSIDE; break;
-                case 'Q': pos->castling_rights |= WHITE_QUEENSIDE; break;
-                case 'k': pos->castling_rights |= BLACK_KINGSIDE; break;
-                case 'q': pos->castling_rights |= BLACK_QUEENSIDE; break;
+                case 'K': bit = WHITE_KINGSIDE; break;
+                case 'Q': bit = WHITE_QUEENSIDE; break;
+                case 'k': bit = BLACK_KINGSIDE; break;
+                case 'q': bit = BLACK_QUEENSIDE; break;
+                default: return fen_fail("FEN castling field must be '-' or a subset of KQkq");
             }
+            if (tmp.castling_rights & bit) {
+                return fen_fail("FEN castling field repeats a right");
+            }
+            tmp.castling_rights |= bit;
         }
     }
 
-    if (tokens[3][0] != '-') {
-        int file = tokens[3][0] - 'a';
-        int rank = tokens[3][1] - '1';
-        pos->en_passant_square = rank * 8 + file;
+    if (tokens[3][0] == '-' && tokens[3][1] == '\0') {
+        tmp.en_passant_square = -1;
     } else {
-        pos->en_passant_square = -1;
+        char ep_file = tokens[3][0];
+        char ep_rank = tokens[3][1];
+        if (ep_file < 'a' || ep_file > 'h' || ep_rank < '1' || ep_rank > '8' ||
+            tokens[3][2] != '\0') {
+            return fen_fail("FEN en passant field must be '-' or a square like 'd6'");
+        }
+
+        if (ep_rank != '3' && ep_rank != '6') {
+            return fen_fail("FEN en passant square must be on rank 3 or 6");
+        }
+        tmp.en_passant_square = (ep_rank - '1') * 8 + (ep_file - 'a');
     }
 
-    if (token_count >= 5) pos->halfmove_clock = atoi(tokens[4]);
-    if (token_count >= 6) pos->fullmove_number = atoi(tokens[5]);
-
-    pos->history_count = 0;
-    pos->history_start = 0;
-    memset(pos->position_history, 0, sizeof(pos->position_history));
-
-    if (!is_position_legal(pos)) {
-        fprintf(stderr, "Illegal position: kings adjacent\n");
-        exit(EXIT_FAILURE);
+    tmp.halfmove_clock = 0;
+    tmp.fullmove_number = 1;
+    if (token_count >= 5) {
+        long value;
+        if (!parse_fen_uint(tokens[4], &value)) {
+            return fen_fail("FEN halfmove clock must be a non-negative integer");
+        }
+        tmp.halfmove_clock = (value > 100) ? 100 : (int)value;
     }
+    if (token_count >= 6) {
+        long value;
+        if (!parse_fen_uint(tokens[5], &value)) {
+            return fen_fail("FEN fullmove number must be a non-negative integer");
+        }
+        tmp.fullmove_number = (value < 1) ? 1 : (int)value;
+    }
+
+    tmp.history_count = 0;
+    tmp.history_base = 0;
+    memset(tmp.position_history, 0, sizeof(tmp.position_history));
+
+    if (!is_position_legal(&tmp)) {
+        return fen_fail("illegal position: needs exactly one king per side, kings not adjacent");
+    }
+
+    *pos = tmp;
+    fen_error_msg[0] = '\0';
+    return true;
 }
 
 void make_move_full(Position* pos, Move* move, UndoInfo* undo) {
@@ -176,6 +250,7 @@ void make_move_full(Position* pos, Move* move, UndoInfo* undo) {
 
     uint64_t current_hash = compute_hash(pos);
     undo->old_history_count = pos->history_count;
+    undo->old_history_base = pos->history_base;
     add_position_to_history(pos, current_hash);
 
     Color us = pos->to_move;
@@ -270,8 +345,9 @@ void make_move_full(Position* pos, Move* move, UndoInfo* undo) {
 
     if (move->captured != EMPTY || move->piece == PAWN) {
 
-        pos->history_count = 0;
-        pos->history_start = 0;
+        pos->halfmove_clock = 0;
+
+        pos->history_base = pos->history_count;
     } else {
         pos->halfmove_clock++;
     }
@@ -297,10 +373,8 @@ void undo_move_full(Position* pos, Move* move, UndoInfo* undo) {
         pos->fullmove_number--;
     }
 
-    if (undo->old_history_count >= 0 && undo->old_history_count <= pos->history_count) {
-        pos->history_count = undo->old_history_count;
-
-    }
+    pos->history_count = undo->old_history_count;
+    pos->history_base = undo->old_history_base;
 
     if (undo->was_castling) {
         pos->pieces[us][KING] &= ~(1ULL << move->to);
@@ -440,7 +514,7 @@ int count_position_occurrences(Position* pos, uint64_t hash) {
 
     int count = 1;
 
-    for (int i = 0; i < pos->history_count; i++) {
+    for (int i = pos->history_base; i < pos->history_count; i++) {
         if (pos->position_history[i] == hash) {
             count++;
         }
@@ -452,14 +526,35 @@ int count_position_occurrences(Position* pos, uint64_t hash) {
 void add_position_to_history(Position* pos, uint64_t hash) {
     if (!pos) return;
 
-    if (pos->history_count < MAX_POSITION_HISTORY) {
-        pos->position_history[pos->history_count] = hash;
-        pos->history_count++;
-    } else {
+    if (pos->history_count >= MAX_POSITION_HISTORY) {
 
-        pos->position_history[pos->history_start] = hash;
-        pos->history_start = (pos->history_start + 1) % MAX_POSITION_HISTORY;
+        return;
     }
+
+    pos->position_history[pos->history_count] = hash;
+    pos->history_count++;
+}
+
+void compact_position_history(Position* pos) {
+    if (!pos) return;
+
+    int live = pos->history_count - pos->history_base;
+    if (live < 0) live = 0;
+
+    if (live > HISTORY_GAME_LIMIT) {
+
+        pos->history_base += live - HISTORY_GAME_LIMIT;
+        live = HISTORY_GAME_LIMIT;
+    }
+
+    if (live > 0 && pos->history_base > 0) {
+        memmove(pos->position_history,
+                pos->position_history + pos->history_base,
+                (size_t)live * sizeof(uint64_t));
+    }
+
+    pos->history_base = 0;
+    pos->history_count = live;
 }
 
 void remove_last_position_from_history(Position* pos, UndoInfo* undo) {

@@ -18,20 +18,17 @@
 #define PAWN_CHAIN_BONUS 8
 #define ADVANCED_PASSED_BONUS 50
 
-#define KING_SAFETY_PENALTY_FACTOR 30
 #define UNCASTLED_KING_PENALTY -60
 #define OPEN_FILE_NEAR_KING_PENALTY -40
 
 #define MOBILITY_BONUS_FACTOR 5
 #define CENTER_CONTROL_BONUS 20
 #define KNIGHT_OUTPOST_BONUS 25
-#define BISHOP_MOBILITY_BONUS 8
 #define ROOK_OPEN_FILE_BONUS 30
 #define QUEEN_EARLY_DEVELOPMENT_PENALTY -40
 
 #define PIN_BONUS 20
 #define FORK_BONUS 30
-#define CHECK_THREAT_BONUS 15
 
 #define CENTRAL_PAWN_DEVELOPMENT_BONUS 15
 
@@ -146,7 +143,8 @@ static const EvaluationWeights opening_weights = {
     .pawns = 0.7f,
     .king_safety = 0.8f,
     .center_control = 1.5f,
-    .development = 2.0f,
+
+    .development = 0.5f,
     .mobility = 0.8f,
     .piece_activity = 0.9f,
     .tactical = 1.0f
@@ -208,6 +206,59 @@ static inline GamePhase detect_game_phase(Position* pos) {
     if (total_material > 30) return PHASE_OPENING;
     if (total_material < 12) return PHASE_ENDGAME;
     return PHASE_MIDDLEGAME;
+}
+
+#define PHASE_MATERIAL_MAX 62
+
+#define PHASE_ANCHOR_MID ((21 * 256 + PHASE_MATERIAL_MAX / 2) / PHASE_MATERIAL_MAX)
+
+static inline int game_phase_256(const Position* pos) {
+    if (!pos) return 256;
+
+    int total_material = 0;
+    for (Color color = WHITE; color <= BLACK; color++) {
+        total_material += __builtin_popcountll(pos->pieces[color][QUEEN]) * 9;
+        total_material += __builtin_popcountll(pos->pieces[color][ROOK]) * 5;
+        total_material += __builtin_popcountll(pos->pieces[color][BISHOP]) * 3;
+        total_material += __builtin_popcountll(pos->pieces[color][KNIGHT]) * 3;
+    }
+    if (total_material > PHASE_MATERIAL_MAX) total_material = PHASE_MATERIAL_MAX;
+
+    return (total_material * 256 + PHASE_MATERIAL_MAX / 2) / PHASE_MATERIAL_MAX;
+}
+
+static inline EvaluationWeights get_evaluation_weights_tapered(int p256) {
+    const EvaluationWeights* a;
+    const EvaluationWeights* b;
+    int numerator;
+    int denominator;
+
+    if (p256 <= PHASE_ANCHOR_MID) {
+        a = &endgame_weights;    b = &middlegame_weights;
+        numerator = p256;                     denominator = PHASE_ANCHOR_MID;
+    } else {
+        a = &middlegame_weights; b = &opening_weights;
+        numerator = p256 - PHASE_ANCHOR_MID;  denominator = 256 - PHASE_ANCHOR_MID;
+    }
+
+    const float t = (float)numerator / (float)denominator;
+    EvaluationWeights w;
+    w.material       = a->material       + (b->material       - a->material)       * t;
+    w.pst            = a->pst            + (b->pst            - a->pst)            * t;
+    w.pawns          = a->pawns          + (b->pawns          - a->pawns)          * t;
+    w.king_safety    = a->king_safety    + (b->king_safety    - a->king_safety)    * t;
+    w.center_control = a->center_control + (b->center_control - a->center_control) * t;
+    w.development    = a->development    + (b->development    - a->development)    * t;
+    w.mobility       = a->mobility       + (b->mobility       - a->mobility)       * t;
+    w.piece_activity = a->piece_activity + (b->piece_activity - a->piece_activity) * t;
+    w.tactical       = a->tactical       + (b->tactical       - a->tactical)       * t;
+    return w;
+}
+
+static inline int king_pst_tapered(int pst_square, int p256) {
+    const int mg = king_middlegame_pst[pst_square];
+    const int eg = king_endgame_pst[pst_square];
+    return (mg * p256 + eg * (256 - p256)) / 256;
 }
 
 #endif 

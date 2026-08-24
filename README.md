@@ -1,11 +1,11 @@
-# Chessenger 0.2
+# Chessenger 0.3
 
 Chessenger is a UCI chess engine in C99, written by AI coding assistants under the direction of Dariusz Domagała
 (see [How Chessenger is made](#how-chessenger-is-made)).
 
-- Version: 0.2 (code date 2026-08-09)
-- Strength: not measured
-- What is new: First Chessenger: bitboards, alpha-beta with quiescence search, transposition table, UCI.
+- Version: 0.3 (code date 2026-08-24)
+- Strength: about 1950 (two runs: 1943.56 and 1962.74)
+- What is new: Magic bitboards for sliding pieces; many search and evaluation fixes.
 
 ## How Chessenger is made
 
@@ -35,7 +35,12 @@ README says how the figure was obtained. The author is responsible for the code 
 
 ## How strength was measured
 
-This version was never measured. The project's first rating run used later development code, so its result does not belong to 0.2.
+CElo on the scale of MCERL, the Mac Chess Engines Rating List (https://www.chessengeria.eu/mcerl),
+which the author maintains. Chessenger played with one thread. A rating is the opponent's MCERL rating plus the
+Elo difference measured in the games, and it belongs to the measured binary. MCERL ratings are not directly
+comparable with other rating lists such as CCRL or CEGT.
+
+Two runs of 360 games each at 2 s + 0.2 s per move, on a MacBook Pro M1 Pro: against Lux 1.0 (MCERL 2015) the result was 1943.56 [1907.7, 1979.4], against Cadabra 2.0.1 (MCERL 2303) 1962.74 [1909.8, 2015.7]. This version has no Hash option and played with its fixed table of 56 MiB; Cadabra played with Hash 128 MB.
 
 ## About the source
 
@@ -44,7 +49,9 @@ the development history stays private. Removing comments and switches does not c
 the same flags, the cleaned source and the original give the same binary. Identifiers and messages were then
 translated into English; that changes names and text only, not the search (same nodes, moves and lines on the
 24 test positions). The published source builds an engine that searches exactly the same nodes and plays the
-same moves on those 24 positions as a build of the original development source.
+same moves on those 24 positions as a build of the original development source (the measured binary was not kept).
+On Linux and Windows the C library orders moves with equal scores differently, so node counts there differ from
+macOS; the strength was measured on macOS.
 
 ## Build
 
@@ -57,15 +64,15 @@ make release    # all binaries into dist/ (Linux and Windows need zig)
 
 | File | For |
 |---|---|
-| `chessenger-0.2-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
-| `chessenger-0.2-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
-| `chessenger-0.2-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
-| `chessenger-0.2-linux-arm64.tar.gz` | Linux, ARM64 (static) |
-| `chessenger-0.2-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
-| `chessenger-0.2-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
-| `chessenger-0.2-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
-| `chessenger-0.2-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
-| `chessenger-0.2-windows-arm64.zip` | Windows on ARM (ARM64) |
+| `chessenger-0.3-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
+| `chessenger-0.3-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
+| `chessenger-0.3-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
+| `chessenger-0.3-linux-arm64.tar.gz` | Linux, ARM64 (static) |
+| `chessenger-0.3-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
+| `chessenger-0.3-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
+| `chessenger-0.3-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
+| `chessenger-0.3-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
+| `chessenger-0.3-windows-arm64.zip` | Windows on ARM (ARM64) |
 
 Each archive holds the binary, `LICENSE`, `README.md` and, where the version has one, `LICENSES/`.
 
@@ -74,7 +81,7 @@ If unsure on Windows, take `avx2`; on Windows on ARM, take `arm64`.
 ## UCI
 
 Use Chessenger with a UCI chess GUI or from the command line.
-The engine reports itself as `id name Chessenger 0.2`.
+The engine reports itself as `id name Chessenger 0.3`.
 
 ### Commands
 
@@ -82,8 +89,8 @@ The engine reports itself as `id name Chessenger 0.2`.
 |---|---|
 | `uci` | Engine name, author and options, then `uciok` |
 | `isready` | Answers `readyok` |
-| `position startpos`, optionally followed by `moves <move> ...` | Sets the position |
-| `position fen <FEN>` | Sets the position; moves after the FEN are not applied |
+| `ucinewgame` | Starts a new game |
+| `position startpos` or `position fen <FEN>`, optionally followed by `moves <move> ...` | Sets the position |
 | `setoption` | Accepted and ignored |
 | `go` with `depth`, `wtime`, `btime`, `winc`, `binc`, `movetime`, `infinite` | Starts a search, which ends with `bestmove` |
 | `stop` | Ends the search; the engine answers with `bestmove` |
@@ -95,8 +102,11 @@ Commands outside the UCI protocol, for testing:
 |---|---|
 | `perft <N>` | Counts the positions N plies ahead (N up to 8) |
 | `divide <N>` | The same count split by first move (N up to 6) |
+| `d` | Prints the current position (FEN, side to move, castling, en passant) |
+| `eval` | Prints the static evaluation of the current position |
+| `hash` | Prints the hash key of the current position |
 
-`ucinewgame` is read as `uci`: the engine answers with its id and `uciok` and changes nothing. `ponderhit`, `debug` and `register` are not supported; a command the engine does not know gets no answer.
+`ponderhit`, `debug` and `register` are not supported; a command the engine does not know gets no answer.
 
 ### Options
 

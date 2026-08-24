@@ -165,7 +165,7 @@ int evaluate_king_storm(Position* pos, int king_square, Color color) {
             int pawn_rank = pawn_square >> 3;
             int king_rank = king_square >> 3;
 
-            int distance = (color == WHITE) ? (king_rank - pawn_rank) : (pawn_rank - king_rank);
+            int distance = (color == WHITE) ? (pawn_rank - king_rank) : (king_rank - pawn_rank);
 
             if (distance > 0 && distance <= 3) {
                 int storm_penalty = (4 - distance) * 5;
@@ -223,26 +223,20 @@ int count_attackers_near_king(Position* pos, int king_square, Color attacking_co
             Bitboard attacks = 0;
             switch (piece) {
                 case PAWN: {
+
+                    Bitboard pawn_bb = 1ULL << square;
                     if (attacking_color == WHITE) {
-                        if (square >= 8) {
-                            attacks |= (1ULL << (square + 7)) | (1ULL << (square + 9));
-                        }
+                        attacks |= ((pawn_bb & ~file_masks[0]) << 7) |
+                                   ((pawn_bb & ~file_masks[7]) << 9);
                     } else {
-                        if (square < 56) {
-                            attacks |= (1ULL << (square - 7)) | (1ULL << (square - 9));
-                        }
+                        attacks |= ((pawn_bb & ~file_masks[0]) >> 9) |
+                                   ((pawn_bb & ~file_masks[7]) >> 7);
                     }
                     break;
                 }
                 case KNIGHT: {
 
-                    int knight_moves[] = {-17, -15, -10, -6, 6, 10, 15, 17};
-                    for (int i = 0; i < 8; i++) {
-                        int target = square + knight_moves[i];
-                        if (target >= 0 && target < 64) {
-                            attacks |= (1ULL << target);
-                        }
-                    }
+                    attacks |= knight_attacks[square];
                     break;
                 }
                 case BISHOP:
@@ -289,7 +283,7 @@ int evaluate_king_centralization(Position* pos, Color color) {
     if (king_square == -1) return 0;
 
     const int* king_pst = get_pst_table(KING, PHASE_ENDGAME);
-    int pst_square = (color == WHITE) ? king_square : (63 - king_square);
+    int pst_square = (color == WHITE) ? (king_square ^ 56) : king_square;
 
     return king_pst[pst_square];
 }
@@ -389,56 +383,36 @@ int evaluate_castling_safety(Position* pos) {
 int evaluate_king_safety_simplified(Position* pos) {
     if (!pos) return 0;
 
-    GamePhase phase = detect_game_phase(pos);
-    int score = 0;
+    const int p256 = game_phase_256(pos);
 
-    if (phase == PHASE_ENDGAME) {
+    int eg = 0;
+    int mg = 0;
 
-        score += evaluate_king_activity_endgame(pos);
-    } else {
+    if (p256 < 256) {
+        eg += evaluate_king_activity_endgame(pos);
+    }
 
-        score += evaluate_castling_safety(pos);
+    if (p256 > 0) {
+
+        mg += evaluate_castling_safety(pos);
 
         for (Color color = WHITE; color <= BLACK; color++) {
             int color_multiplier = (color == WHITE) ? 1 : -1;
             int king_square = get_king_square(pos, color);
 
             if (king_square != -1) {
-                score += color_multiplier * evaluate_king_shelter(pos, king_square, color);
-                score += color_multiplier * evaluate_king_storm(pos, king_square, color);
-                score += color_multiplier * evaluate_open_files_near_king(pos, king_square, color);
+                mg += color_multiplier * evaluate_king_shelter(pos, king_square, color);
+                mg += color_multiplier * evaluate_king_storm(pos, king_square, color);
+                mg += color_multiplier * evaluate_open_files_near_king(pos, king_square, color);
 
                 if (is_king_in_danger(pos, color)) {
-                    score += color_multiplier * (-30);
+                    mg += color_multiplier * (-30);
                 }
             }
         }
     }
 
-    return score;
-}
-
-int evaluate_enhanced_king_safety_urgency(Position* pos) {
-    if (!pos) return 0;
-
-    int score = evaluate_king_safety_simplified(pos);
-
-    for (Color color = WHITE; color <= BLACK; color++) {
-        int color_multiplier = (color == WHITE) ? 1 : -1;
-        int king_square = get_king_square(pos, color);
-
-        if (king_square != -1) {
-            Color enemy = (color == WHITE) ? BLACK : WHITE;
-            int attackers = count_attackers_near_king(pos, king_square, enemy);
-
-            if (attackers >= 2) {
-                int danger_penalty = KING_SAFETY_PENALTY_FACTOR * attackers * attackers;
-                score += color_multiplier * (-danger_penalty);
-            }
-        }
-    }
-
-    return score;
+    return (mg * p256 + eg * (256 - p256)) / 256;
 }
 
 int evaluate_king_safety(Position* pos) {
