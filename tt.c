@@ -77,10 +77,9 @@ void init_tt(TranspositionTable* tt, int size_mb) {
     int entries = (size_mb * 1024 * 1024) / sizeof(HashEntry);
 
     int size = 1;
-    while (size < entries) {
+    while (size <= entries / 2) {
         size *= 2;
     }
-    size /= 2;
 
     tt->entries = calloc(size, sizeof(HashEntry));
     if (!tt->entries) {
@@ -99,6 +98,27 @@ void clear_tt(TranspositionTable* tt) {
         memset(tt->entries, 0, tt->size * sizeof(HashEntry));
     }
     tt->age = 0;
+}
+
+int hashfull_tt(const TranspositionTable* tt) {
+    if (!tt || !tt->entries || tt->size <= 0) return 0;
+    int sample_n = tt->size < 1000 ? tt->size : 1000;
+    int occ_all = 0;
+    for (int i = 0; i < sample_n; i++) {
+        if (tt->entries[i].key != 0) occ_all++;
+    }
+    return (int)(((long long)occ_all * 1000) / sample_n);
+}
+
+size_t resize_tt(TranspositionTable* tt, int size_mb) {
+    if (size_mb < TT_HASH_MB_MIN) size_mb = TT_HASH_MB_MIN;
+    if (size_mb > TT_HASH_MB_MAX) size_mb = TT_HASH_MB_MAX;
+
+    free_tt(tt);
+    init_tt(tt, size_mb);
+
+    if (!tt->entries) return 0;
+    return (size_t)tt->size * sizeof(HashEntry);
 }
 
 void free_tt(TranspositionTable* tt) {
@@ -125,6 +145,23 @@ static int score_from_tt(int score, int ply) {
     return score;
 }
 
+uint16_t pack_move(Move m) {
+    if (m.from == m.to) return 0;
+    return (uint16_t)(((unsigned)m.from & 0x3Fu)
+                    | (((unsigned)m.to & 0x3Fu) << 6)
+                    | (((unsigned)m.promotion & 0x7u) << 12));
+}
+
+Move unpack_move(uint16_t packed) {
+    Move m = {0};
+    m.from      = (int)(packed & 0x3Fu);
+    m.to        = (int)((packed >> 6) & 0x3Fu);
+    m.promotion = (PieceType)((packed >> 12) & 0x7u);
+    return m;
+}
+
+_Static_assert(sizeof(HashEntry) == 16, "HashEntry must be 16 B; a different field layout costs table entries");
+
 void store_hash(TranspositionTable* tt, uint64_t key, int depth, int score, HashFlag flag, Move best_move, int ply) {
     if (!tt->entries || tt->size == 0) return;
 
@@ -138,14 +175,14 @@ void store_hash(TranspositionTable* tt, uint64_t key, int depth, int score, Hash
     if (entry->key == 0 ||
         entry->key == key ||
         depth >= entry->depth ||
-        entry->age != tt->age) {
+        entry->age != (uint8_t)tt->age) {
 
         entry->key = key;
-        entry->depth = depth;
-        entry->score = score;
-        entry->flag = flag;
-        entry->best_move = best_move;
-        entry->age = tt->age;
+        entry->depth = (int16_t)depth;
+        entry->score = (int16_t)score;
+        entry->flag = (uint8_t)flag;
+        entry->best_move = pack_move(best_move);
+        entry->age = (uint8_t)tt->age;
     }
 }
 
@@ -157,8 +194,8 @@ bool probe_hash(TranspositionTable* tt, uint64_t key, int depth, int alpha, int 
 
     if (entry->key != key) return false;
 
-    if (best_move && entry->best_move.from != entry->best_move.to) {
-        *best_move = entry->best_move;
+    if (best_move && entry->best_move != 0) {
+        *best_move = unpack_move(entry->best_move);
     }
 
     if (entry->depth >= depth) {
@@ -178,4 +215,26 @@ bool probe_hash(TranspositionTable* tt, uint64_t key, int depth, int alpha, int 
     }
 
     return false;
+}
+
+bool probe_hash_entry(TranspositionTable* tt, uint64_t key, int* depth, int* flag, int* score, int ply) {
+    if (!tt->entries || tt->size == 0) return false;
+    HashEntry* entry = &tt->entries[key & tt->mask];
+    if (entry->key != key) return false;
+    *depth = entry->depth;
+    *flag  = entry->flag;
+    *score = score_from_tt(entry->score, ply);
+    return true;
+}
+
+bool tt_node_value(TranspositionTable* tt, uint64_t key, int* score, int ply) {
+    if (!tt->entries || tt->size == 0) return false;
+    HashEntry* entry = &tt->entries[key & tt->mask];
+    if (entry->key != key) return false;
+    if (entry->flag != HASH_EXACT) return false;
+    int s = score_from_tt(entry->score, ply);
+    if (s >=  MATE_SCORE - MATE_DISTANCE_BOUND) return false;
+    if (s <= -MATE_SCORE + MATE_DISTANCE_BOUND) return false;
+    *score = s;
+    return true;
 }

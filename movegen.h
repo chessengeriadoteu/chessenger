@@ -35,6 +35,12 @@ int generate_en_passant_moves(Position* pos, Move* moves, int move_count);
 int generate_moves(Position* pos, Move* moves);
 int generate_legal_moves(Position* pos, Move* moves);
 
+int generate_noisy_moves(Position* pos, Move* moves);
+int generate_legal_noisy(Position* pos, Move* moves);
+
+int generate_check_evasions(Position* pos, Move* moves);
+int generate_legal_evasions(Position* pos, Move* moves);
+
 void score_moves(Move* moves, int move_count, Move hash_move);
 void score_moves_with_killers(Move* moves, int move_count, Move hash_move, int ply);
 int compare_moves(const void* a, const void* b);

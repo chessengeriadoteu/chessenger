@@ -4,6 +4,7 @@
 #include "board.h"
 #include "utils.h"
 #include "tt.h"
+#include "eval.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,47 @@ bool is_position_legal(const Position *pos) {
     }
 
     return true;
+}
+
+void recompute_material(Position* pos) {
+    if (!pos) return;
+    int balance = 0;
+    int phase_sum   = 0;
+    for (Color color = WHITE; color <= BLACK; color++) {
+        const int sign = (color == WHITE) ? 1 : -1;
+        balance += sign * __builtin_popcountll(pos->pieces[color][PAWN])   * PAWN_VALUE;
+        balance += sign * __builtin_popcountll(pos->pieces[color][ROOK])   * ROOK_VALUE;
+        balance += sign * __builtin_popcountll(pos->pieces[color][KNIGHT]) * KNIGHT_VALUE;
+        balance += sign * __builtin_popcountll(pos->pieces[color][BISHOP]) * BISHOP_VALUE;
+        balance += sign * __builtin_popcountll(pos->pieces[color][QUEEN])  * QUEEN_VALUE;
+        phase_sum   += __builtin_popcountll(pos->pieces[color][QUEEN])  * 9;
+        phase_sum   += __builtin_popcountll(pos->pieces[color][ROOK])   * 5;
+        phase_sum   += __builtin_popcountll(pos->pieces[color][BISHOP]) * 3;
+        phase_sum   += __builtin_popcountll(pos->pieces[color][KNIGHT]) * 3;
+    }
+    pos->mat_balance = balance;
+    pos->mat_phase   = phase_sum;
+}
+
+static int piece_material_value(PieceType t) {
+    switch (t) {
+        case PAWN:   return PAWN_VALUE;
+        case ROOK:   return ROOK_VALUE;
+        case KNIGHT: return KNIGHT_VALUE;
+        case BISHOP: return BISHOP_VALUE;
+        case QUEEN:  return QUEEN_VALUE;
+        default:     return 0;
+    }
+}
+
+static int phase_weight(PieceType t) {
+    switch (t) {
+        case QUEEN:  return 9;
+        case ROOK:   return 5;
+        case BISHOP: return 3;
+        case KNIGHT: return 3;
+        default:     return 0;
+    }
 }
 
 void setup_starting_position(Position* pos) {
@@ -73,6 +115,9 @@ void setup_starting_position(Position* pos) {
     pos->history_count = 0;
     pos->history_base = 0;
     memset(pos->position_history, 0, sizeof(pos->position_history));
+
+    pos->hash = compute_hash(pos);
+    recompute_material(pos);
 }
 
 static char fen_error_msg[160] = "";
@@ -233,6 +278,9 @@ bool parse_fen(Position* pos, const char* fen) {
         return fen_fail("illegal position: needs exactly one king per side, kings not adjacent");
     }
 
+    tmp.hash = compute_hash(&tmp);
+    recompute_material(&tmp);
+
     *pos = tmp;
     fen_error_msg[0] = '\0';
     return true;
@@ -248,7 +296,10 @@ void make_move_full(Position* pos, Move* move, UndoInfo* undo) {
     undo->was_castling = move->is_castling;
     undo->captured_square = move->to;
 
-    uint64_t current_hash = compute_hash(pos);
+    uint64_t current_hash = pos->hash;
+    undo->old_hash = current_hash;
+    undo->old_mat_balance = pos->mat_balance;
+    undo->old_mat_phase   = pos->mat_phase;
     undo->old_history_count = pos->history_count;
     undo->old_history_base = pos->history_base;
     add_position_to_history(pos, current_hash);
@@ -313,6 +364,25 @@ void make_move_full(Position* pos, Move* move, UndoInfo* undo) {
         pos->occupied[us] |= (1ULL << move->to);
     }
 
+    {
+        const int own_sign = (us == WHITE) ? 1 : -1;
+        if (move->is_en_passant) {
+
+            pos->mat_balance += own_sign * PAWN_VALUE;
+        } else {
+            if (move->captured != EMPTY) {
+
+                pos->mat_balance += own_sign * piece_material_value(move->captured);
+                pos->mat_phase   -= phase_weight(move->captured);
+            }
+            if (move->promotion != EMPTY) {
+
+                pos->mat_balance += own_sign * (piece_material_value(move->promotion) - PAWN_VALUE);
+                pos->mat_phase   += phase_weight(move->promotion);
+            }
+        }
+    }
+
     if (move->piece == KING) {
         if (us == WHITE) {
             pos->castling_rights &= ~(WHITE_KINGSIDE | WHITE_QUEENSIDE);
@@ -357,6 +427,50 @@ void make_move_full(Position* pos, Move* move, UndoInfo* undo) {
     }
 
     pos->to_move = them;
+
+    {
+        uint64_t h = current_hash;
+
+        h ^= zobrist_pieces[us][move->piece][move->from];
+
+        if (move->is_castling) {
+
+            h ^= zobrist_pieces[us][KING][move->to];
+            int rook_from = -1, rook_to = -1;
+            if (us == WHITE) {
+                if (move->to == 6)       { rook_from = 7;  rook_to = 5;  }
+                else if (move->to == 2)  { rook_from = 0;  rook_to = 3;  }
+            } else {
+                if (move->to == 62)      { rook_from = 63; rook_to = 61; }
+                else if (move->to == 58) { rook_from = 56; rook_to = 59; }
+            }
+            if (rook_from >= 0) {
+                h ^= zobrist_pieces[us][ROOK][rook_from];
+                h ^= zobrist_pieces[us][ROOK][rook_to];
+            }
+        } else if (move->is_en_passant) {
+
+            h ^= zobrist_pieces[them][PAWN][undo->captured_square];
+            h ^= zobrist_pieces[us][PAWN][move->to];
+        } else {
+            if (move->captured != EMPTY) {
+                h ^= zobrist_pieces[them][move->captured][move->to];
+            }
+            PieceType placed = (move->promotion != EMPTY) ? move->promotion : move->piece;
+            h ^= zobrist_pieces[us][placed][move->to];
+        }
+
+        h ^= zobrist_castling[undo->castling_rights];
+        h ^= zobrist_castling[pos->castling_rights];
+
+        if (undo->en_passant_square != -1) h ^= zobrist_en_passant[undo->en_passant_square];
+        if (pos->en_passant_square != -1)  h ^= zobrist_en_passant[pos->en_passant_square];
+
+        h ^= zobrist_side_to_move;
+
+        pos->hash = h;
+    }
+
 }
 
 void undo_move_full(Position* pos, Move* move, UndoInfo* undo) {
@@ -436,6 +550,11 @@ void undo_move_full(Position* pos, Move* move, UndoInfo* undo) {
     }
 
     pos->all_pieces = pos->occupied[WHITE] | pos->occupied[BLACK];
+
+    pos->hash = undo->old_hash;
+    pos->mat_balance = undo->old_mat_balance;
+    pos->mat_phase   = undo->old_mat_phase;
+
 }
 
 bool has_insufficient_material(Position* pos) {
@@ -494,8 +613,7 @@ GameResult check_game_result(Position* pos) {
 bool is_threefold_repetition(Position* pos) {
     if (!pos) return false;
 
-    uint64_t current_hash = compute_hash(pos);
-    int occurrences = count_position_occurrences(pos, current_hash);
+    int occurrences = count_position_occurrences(pos, pos->hash);
 
     return occurrences >= 3;
 }
@@ -503,8 +621,7 @@ bool is_threefold_repetition(Position* pos) {
 bool is_approaching_repetition(Position* pos) {
     if (!pos) return false;
 
-    uint64_t current_hash = compute_hash(pos);
-    int occurrences = count_position_occurrences(pos, current_hash);
+    int occurrences = count_position_occurrences(pos, pos->hash);
 
     return occurrences >= 2;
 }

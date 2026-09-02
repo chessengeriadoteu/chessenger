@@ -38,6 +38,19 @@ Move search_single_depth_with_nodes(Position* pos, int depth, int alpha, int bet
 
 bool was_root_search_interrupted(void);
 
+#define MAX_MULTIPV 218
+extern Move root_excluded[MAX_MULTIPV];
+extern int  root_excluded_count;
+bool is_root_excluded(const Move* m);
+
+extern Move root_included[MAX_MULTIPV];
+extern int  root_included_count;
+bool is_root_included(const Move* m);
+
+void set_node_limit(long long limit);
+long long get_nodes_searched(void);
+bool node_limit_hit(void);
+
 void score_moves(Move* moves, int count, Move tt_move);
 int piece_value(int piece);
 
@@ -56,5 +69,9 @@ void set_search_time_limit(long long time_limit_ms);
 void set_search_unbounded(bool unbounded);
 void start_search_timer(void);
 bool is_time_exceeded(void);
+
+void set_ponder_mode(bool on, long long budget_ms);
+bool is_ponder_mode(void);
+bool ponderhit_seen(void);
 
 #endif

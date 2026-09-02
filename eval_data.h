@@ -195,13 +195,7 @@ static inline EvaluationWeights get_evaluation_weights(GamePhase phase) {
 static inline GamePhase detect_game_phase(Position* pos) {
     if (!pos) return PHASE_MIDDLEGAME;
 
-    int total_material = 0;
-    for (Color color = WHITE; color <= BLACK; color++) {
-        total_material += __builtin_popcountll(pos->pieces[color][QUEEN]) * 9;
-        total_material += __builtin_popcountll(pos->pieces[color][ROOK]) * 5;
-        total_material += __builtin_popcountll(pos->pieces[color][BISHOP]) * 3;
-        total_material += __builtin_popcountll(pos->pieces[color][KNIGHT]) * 3;
-    }
+    const int total_material = pos->mat_phase;
 
     if (total_material > 30) return PHASE_OPENING;
     if (total_material < 12) return PHASE_ENDGAME;
@@ -215,13 +209,7 @@ static inline GamePhase detect_game_phase(Position* pos) {
 static inline int game_phase_256(const Position* pos) {
     if (!pos) return 256;
 
-    int total_material = 0;
-    for (Color color = WHITE; color <= BLACK; color++) {
-        total_material += __builtin_popcountll(pos->pieces[color][QUEEN]) * 9;
-        total_material += __builtin_popcountll(pos->pieces[color][ROOK]) * 5;
-        total_material += __builtin_popcountll(pos->pieces[color][BISHOP]) * 3;
-        total_material += __builtin_popcountll(pos->pieces[color][KNIGHT]) * 3;
-    }
+    int total_material = pos->mat_phase;
     if (total_material > PHASE_MATERIAL_MAX) total_material = PHASE_MATERIAL_MAX;
 
     return (total_material * 256 + PHASE_MATERIAL_MAX / 2) / PHASE_MATERIAL_MAX;

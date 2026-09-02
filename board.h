@@ -43,6 +43,11 @@ typedef struct {
     int halfmove_clock;
     int fullmove_number;
 
+    uint64_t hash;
+
+    int mat_balance;
+    int mat_phase;
+
     uint64_t position_history[MAX_POSITION_HISTORY];
     int history_count;
     int history_base;
@@ -61,7 +66,14 @@ typedef struct {
     int old_history_count;
     int old_history_base;
     uint64_t removed_hash;
+
+    uint64_t old_hash;
+
+    int old_mat_balance;
+    int old_mat_phase;
 } UndoInfo;
+
+void recompute_material(Position* pos);
 
 typedef enum {
     GAME_ONGOING,

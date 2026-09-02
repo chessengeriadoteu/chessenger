@@ -23,15 +23,7 @@ static int evaluate_material_count(Position* pos) {
 
     int score = 0;
 
-    for (Color color = WHITE; color <= BLACK; color++) {
-        int color_multiplier = (color == WHITE) ? 1 : -1;
-
-        score += color_multiplier * __builtin_popcountll(pos->pieces[color][PAWN]) * PAWN_VALUE;
-        score += color_multiplier * __builtin_popcountll(pos->pieces[color][ROOK]) * ROOK_VALUE;
-        score += color_multiplier * __builtin_popcountll(pos->pieces[color][KNIGHT]) * KNIGHT_VALUE;
-        score += color_multiplier * __builtin_popcountll(pos->pieces[color][BISHOP]) * BISHOP_VALUE;
-        score += color_multiplier * __builtin_popcountll(pos->pieces[color][QUEEN]) * QUEEN_VALUE;
-    }
+    score = pos->mat_balance;
 
     for (Color color = WHITE; color <= BLACK; color++) {
         int color_multiplier = (color == WHITE) ? 1 : -1;
@@ -513,7 +505,10 @@ static Bitboard attacked_squares_of(Position* pos, Color color) {
     return map;
 }
 
+int hung_penalty_stm = 0;
+
 int evaluate_hung_pieces(Position* pos) {
+    hung_penalty_stm = 0;
     if (!pos) return 0;
 
     int score = 0;
@@ -550,8 +545,11 @@ int evaluate_hung_pieces(Position* pos) {
                         int penalty = piece_value / 2;
                         score += color_multiplier * (-penalty);
 
+                        if (color == pos->to_move) hung_penalty_stm += penalty;
+
                         if (piece_type != PAWN && detect_game_phase(pos) == PHASE_OPENING) {
                             score += color_multiplier * (-100);
+                            if (color == pos->to_move) hung_penalty_stm += 100;
                         }
                     }
                 }

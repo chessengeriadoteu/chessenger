@@ -1,11 +1,11 @@
-# Chessenger 0.3
+# Chessenger 0.4
 
 Chessenger is a UCI chess engine in C99, written by AI coding assistants under the direction of Dariusz Domagała
 (see [How Chessenger is made](#how-chessenger-is-made)).
 
-- Version: 0.3 (code date 2026-08-24)
-- Strength: about 1950 (two runs: 1943.56 and 1962.74)
-- What is new: Magic bitboards for sliding pieces; many search and evaluation fixes.
+- Version: 0.4 (code date 2026-09-02)
+- Strength: 2186.24 [2143.17, 2229.32] (chained anchor, run A76)
+- What is new: First UCI options (Hash, MultiPV, Clear Hash, Ponder); search and move ordering work.
 
 ## How Chessenger is made
 
@@ -40,7 +40,7 @@ which the author maintains. Chessenger played with one thread. A rating is the o
 Elo difference measured in the games, and it belongs to the measured binary. MCERL ratings are not directly
 comparable with other rating lists such as CCRL or CEGT.
 
-Two runs of 360 games each at 2 s + 0.2 s per move, on a MacBook Pro M1 Pro: against Lux 1.0 (MCERL 2015) the result was 1943.56 [1907.7, 1979.4], against Cadabra 2.0.1 (MCERL 2303) 1962.74 [1909.8, 2015.7]. This version has no Hash option and played with its fixed table of 56 MiB; Cadabra played with Hash 128 MB.
+A chain on one machine (MacBook Pro M1 Pro), 2 s + 0.2 s per move: an earlier development build played 500 games against Schildkroete 180209 (MCERL 2024) and was rated 2035.82; three runs of Chessenger against itself (Hash 128 MB), each between consecutive development builds, added +26.11, +57.86 and +66.46 Elo. This version is the last link; it was not measured directly against a rated engine.
 
 ## About the source
 
@@ -49,7 +49,7 @@ the development history stays private. Removing comments and switches does not c
 the same flags, the cleaned source and the original give the same binary. Identifiers and messages were then
 translated into English; that changes names and text only, not the search (same nodes, moves and lines on the
 24 test positions). The published source builds an engine that searches exactly the same nodes and plays the
-same moves on those 24 positions as a build of the original development source (the measured binary was not kept).
+same moves on those 24 positions as the measured binary.
 On Linux and Windows the C library orders moves with equal scores differently, so node counts there differ from
 macOS; the strength was measured on macOS.
 
@@ -64,15 +64,15 @@ make release    # all binaries into dist/ (Linux and Windows need zig)
 
 | File | For |
 |---|---|
-| `chessenger-0.3-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
-| `chessenger-0.3-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
-| `chessenger-0.3-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
-| `chessenger-0.3-linux-arm64.tar.gz` | Linux, ARM64 (static) |
-| `chessenger-0.3-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
-| `chessenger-0.3-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
-| `chessenger-0.3-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
-| `chessenger-0.3-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
-| `chessenger-0.3-windows-arm64.zip` | Windows on ARM (ARM64) |
+| `chessenger-0.4-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
+| `chessenger-0.4-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
+| `chessenger-0.4-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
+| `chessenger-0.4-linux-arm64.tar.gz` | Linux, ARM64 (static) |
+| `chessenger-0.4-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
+| `chessenger-0.4-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
+| `chessenger-0.4-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
+| `chessenger-0.4-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
+| `chessenger-0.4-windows-arm64.zip` | Windows on ARM (ARM64) |
 
 Each archive holds the binary, `LICENSE`, `README.md` and, where the version has one, `LICENSES/`.
 
@@ -81,7 +81,7 @@ If unsure on Windows, take `avx2`; on Windows on ARM, take `arm64`.
 ## UCI
 
 Use Chessenger with a UCI chess GUI or from the command line.
-The engine reports itself as `id name Chessenger 0.3`.
+The engine reports itself as `id name Chessenger 0.4`.
 
 ### Commands
 
@@ -91,9 +91,10 @@ The engine reports itself as `id name Chessenger 0.3`.
 | `isready` | Answers `readyok` |
 | `ucinewgame` | Starts a new game |
 | `position startpos` or `position fen <FEN>`, optionally followed by `moves <move> ...` | Sets the position |
-| `setoption` | Accepted and ignored |
-| `go` with `depth`, `wtime`, `btime`, `winc`, `binc`, `movetime`, `infinite` | Starts a search, which ends with `bestmove` |
+| `setoption name <name> value <value>` | Sets an option from the table below |
+| `go` with `depth`, `wtime`, `btime`, `winc`, `binc`, `movestogo`, `movetime`, `nodes`, `mate`, `infinite`, `ponder`, `searchmoves` | Starts a search, which ends with `bestmove` |
 | `stop` | Ends the search; the engine answers with `bestmove` |
+| `ponderhit` | The expected move was played: pondering becomes a normal search |
 | `quit` | Exits |
 
 Commands outside the UCI protocol, for testing:
@@ -106,20 +107,28 @@ Commands outside the UCI protocol, for testing:
 | `eval` | Prints the static evaluation of the current position |
 | `hash` | Prints the hash key of the current position |
 
-`ponderhit`, `debug` and `register` are not supported; a command the engine does not know gets no answer.
+`debug` and `register` are not supported. After `uci`, any command the engine does not know is answered with `info string <command>: command NOT SUPPORTED`.
 
 ### Options
 
-This version announces no UCI options; `setoption` is accepted and ignored.
+| Option | Type | Default | Range | What it does |
+|---|---|---|---|---|
+| `Hash` | spin | 64 | 1-1024 | Transposition table size in MB |
+| `MultiPV` | spin | 1 | 1-218 | Number of best lines reported |
+| `Clear Hash` | button | | | Clears the transposition table, killer moves and history |
+| `Threads` | spin | 1 | 1-1 | The engine is single-threaded |
+| `Ponder` | check | false | | Thinking on the opponent's time (`go ponder`, `ponderhit`) |
 
 ## Thanks
 
+- Oliver Brausch, for OliThink 5.10.5: our null-move reduction, singular extension, late move reduction, late move pruning, SEE pruning and history pruning use its formulas and values.
 - Tomasz Michniewski, for the Simplified Evaluation Function on the Chess Programming Wiki, whose piece-square tables our `eval_data.h` is based on.
 - The Chess Programming Wiki and its authors.
 
 ## License
 
 GPL-3.0-or-later, see `LICENSE`.
+Code adapted from OliThink 5.10.5 is also under its MIT license, see `LICENSES/OLITHINK-MIT.txt`.
 
 Chessenger is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
 License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any

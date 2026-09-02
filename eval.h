@@ -36,6 +36,8 @@ int evaluate_anti_grabby_patterns(Position* pos);
 
 int evaluate_hung_pieces(Position* pos);
 
+extern int hung_penalty_stm;
+
 extern Bitboard knight_attacks[64];
 extern Bitboard king_attacks[64];
 

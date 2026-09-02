@@ -6,6 +6,7 @@
 
 #include "board.h"
 #include <stdint.h>
+#include <stddef.h>
 
 typedef enum {
     HASH_ALPHA,
@@ -15,11 +16,11 @@ typedef enum {
 
 typedef struct {
     uint64_t key;
-    int depth;
-    int score;
-    HashFlag flag;
-    Move best_move;
-    int age;
+    int16_t  score;
+    uint16_t best_move;
+    int16_t  depth;
+    uint8_t  flag;
+    uint8_t  age;
 } HashEntry;
 
 typedef struct {
@@ -37,12 +38,27 @@ extern uint64_t zobrist_side_to_move;
 void init_zobrist(void);
 void init_tt(TranspositionTable* tt, int size_mb);
 void clear_tt(TranspositionTable* tt);
+
+int hashfull_tt(const TranspositionTable* tt);
 void free_tt(TranspositionTable* tt);
+
+#define TT_HASH_MB_MIN      1
+#define TT_HASH_MB_MAX      1024
+#define TT_HASH_MB_DEFAULT  64
+
+size_t resize_tt(TranspositionTable* tt, int size_mb);
 
 uint64_t compute_hash(Position* pos);
 
+uint16_t pack_move(Move m);
+Move     unpack_move(uint16_t packed);
+
 void store_hash(TranspositionTable* tt, uint64_t key, int depth, int score, HashFlag flag, Move best_move, int ply);
 bool probe_hash(TranspositionTable* tt, uint64_t key, int depth, int alpha, int beta, int* score, Move* best_move, int ply);
+
+bool probe_hash_entry(TranspositionTable* tt, uint64_t key, int* depth, int* flag, int* score, int ply);
+
+bool tt_node_value(TranspositionTable* tt, uint64_t key, int* score, int ply);
 
 extern TranspositionTable main_tt;
 

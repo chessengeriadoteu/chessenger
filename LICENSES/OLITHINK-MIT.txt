@@ -1,0 +1,19 @@
+OliThink 5.10.5, (c) Oliver Brausch: license notice
+===================================================
+
+This version of Chessenger contains code adapted from OliThink 5.10.5 by Oliver Brausch.
+OliThink 5.10.5 is licensed under the MIT license. The author granted the license with
+this sentence, line 3 of README.md in the OliThink repository at commit
+3f7bd1f22597736daef19163963ba71869b493c3 (version 5.10.5):
+
+    OliThink(5) is a free and open source chess engine. License: MIT
+
+Copyright notice of OliThink 5.10.5, line 1 of olithink.c:
+
+    OliThink5 (c) Oliver Brausch 12.Jun.2023, ob112@web.de, http://brausch.org
+
+Both indented lines are reproduced verbatim. The OliThink repository contains no
+separate license file, so no full MIT license text is reproduced here in the
+author's name.
+
+Chessenger as a whole is licensed under GPL-3.0-or-later, see LICENSE.

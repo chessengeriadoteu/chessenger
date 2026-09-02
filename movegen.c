@@ -620,11 +620,13 @@ int generate_en_passant_moves(Position* pos, Move* moves, int move_count) {
 bool is_legal_move(Position* pos, Move* move) {
     if (!pos || !move) return false;
 
-    Position temp_pos = *pos;
+    Color us = pos->to_move;
     UndoInfo undo;
-    make_move_full(&temp_pos, move, &undo);
+    make_move_full(pos, move, &undo);
 
-    bool legal = !is_in_check(&temp_pos, pos->to_move);
+    bool legal = !is_in_check(pos, us);
+
+    undo_move_full(pos, move, &undo);
 
     return legal;
 }
@@ -662,6 +664,147 @@ int generate_legal_moves(Position* pos, Move* moves) {
         }
     }
 
+    return legal_count;
+}
+
+static Bitboard checkers_of(Position* pos, int king_sq_idx, Color attacker_color) {
+    Bitboard z = 0;
+
+    Bitboard pawns_bb = pos->pieces[attacker_color][PAWN];
+    Bitboard pawn_attack_bb = (attacker_color == WHITE)
+        ? (((pawns_bb & ~file_masks[0]) << 7) | ((pawns_bb & ~file_masks[7]) << 9))
+        : (((pawns_bb & ~file_masks[0]) >> 9) | ((pawns_bb & ~file_masks[7]) >> 7));
+    if (pawn_attack_bb & (1ULL << king_sq_idx)) {
+
+        Bitboard pawn_from = (attacker_color == WHITE)
+            ? ((((1ULL << king_sq_idx) & ~file_masks[0]) >> 9) | (((1ULL << king_sq_idx) & ~file_masks[7]) >> 7))
+            : ((((1ULL << king_sq_idx) & ~file_masks[0]) << 7) | (((1ULL << king_sq_idx) & ~file_masks[7]) << 9));
+        z |= pawn_from & pawns_bb;
+    }
+
+    z |= knight_attacks[king_sq_idx] & pos->pieces[attacker_color][KNIGHT];
+
+    Bitboard rook_sliders = pos->pieces[attacker_color][ROOK] | pos->pieces[attacker_color][QUEEN];
+    if (rook_sliders) z |= get_rook_attacks_public(king_sq_idx, pos->all_pieces) & rook_sliders;
+
+    Bitboard bishop_sliders = pos->pieces[attacker_color][BISHOP] | pos->pieces[attacker_color][QUEEN];
+    if (bishop_sliders) z |= get_bishop_attacks_public(king_sq_idx, pos->all_pieces) & bishop_sliders;
+
+    return z;
+}
+
+static Bitboard squares_between(int a, int b) {
+    if (a == b) return 0;
+    const int ra = a / 8, fa = a % 8;
+    const int rb = b / 8, fb = b % 8;
+    int dr = (rb > ra) - (rb < ra);
+    int df = (fb > fa) - (fb < fa);
+    if (!(ra == rb || fa == fb || (rb - ra == fb - fa) || (rb - ra == -(fb - fa)))) return 0;
+    Bitboard m = 0;
+    int r = ra + dr, f = fa + df;
+    while (r != rb || f != fb) {
+        if (r < 0 || r > 7 || f < 0 || f > 7) return 0;
+        m |= 1ULL << (r * 8 + f);
+        r += dr; f += df;
+    }
+    return m;
+}
+
+int generate_check_evasions(Position* pos, Move* moves) {
+    if (!pos || !moves) return 0;
+
+    const Color own_color = pos->to_move;
+    const Color opp_color  = 1 - own_color;
+    Bitboard king_bb1 = pos->pieces[own_color][KING];
+    if (king_bb1 == 0) return 0;
+    const int king_sq_idx = __builtin_ctzll(king_bb1);
+
+    const Bitboard checkers_bb = checkers_of(pos, king_sq_idx, opp_color);
+    if (checkers_bb == 0) return 0;
+    const bool double_check = (checkers_bb & (checkers_bb - 1)) != 0;
+
+    Bitboard targets = 0;
+    int ep_capture_sq = -1;
+    if (!double_check) {
+        const int checker_sq = __builtin_ctzll(checkers_bb);
+        targets |= checkers_bb;
+        targets |= squares_between(king_sq_idx, checker_sq);
+
+        if (pos->en_passant_square >= 0 &&
+            (pos->pieces[opp_color][PAWN] & (1ULL << checker_sq))) {
+            const int ep_pawn_sq = (own_color == WHITE) ? pos->en_passant_square - 8
+                                                    : pos->en_passant_square + 8;
+            if (ep_pawn_sq == checker_sq) ep_capture_sq = pos->en_passant_square;
+        }
+    }
+
+    Move buf_area[MAX_MOVES];
+    int total_moves = 0;
+    total_moves = generate_pawn_moves(pos, buf_area, total_moves);
+    total_moves = generate_piece_moves(pos, buf_area, total_moves);
+    total_moves = generate_king_moves(pos, buf_area, total_moves);
+    total_moves = generate_en_passant_moves(pos, buf_area, total_moves);
+
+    int n = 0;
+    for (int i = 0; i < total_moves && n < MAX_MOVES - 1; i++) {
+        const Move* m = &buf_area[i];
+        bool take_it = (m->piece == KING);
+        if (!take_it && !double_check) {
+            if (targets & (1ULL << m->to)) take_it = true;
+            else if (ep_capture_sq >= 0 && m->is_en_passant &&
+                     m->to == ep_capture_sq) take_it = true;
+        }
+        if (take_it) moves[n++] = buf_area[i];
+    }
+    return n;
+}
+
+int generate_legal_evasions(Position* pos, Move* moves) {
+    if (!pos || !moves) return 0;
+
+    Move evasion_cands[MAX_MOVES];
+    const int n = generate_check_evasions(pos, evasion_cands);
+
+    int legal_count = 0;
+    for (int i = 0; i < n && legal_count < MAX_MOVES - 1; i++) {
+        if (is_legal_move(pos, &evasion_cands[i])) {
+            moves[legal_count++] = evasion_cands[i];
+        }
+    }
+    return legal_count;
+}
+
+int generate_noisy_moves(Position* pos, Move* moves) {
+    if (!pos || !moves) return 0;
+
+    Move buf_area[MAX_MOVES];
+    int total_moves = 0;
+    total_moves = generate_pawn_moves(pos, buf_area, total_moves);
+    total_moves = generate_piece_moves(pos, buf_area, total_moves);
+    total_moves = generate_king_moves(pos, buf_area, total_moves);
+    total_moves = generate_en_passant_moves(pos, buf_area, total_moves);
+
+    int n = 0;
+    for (int i = 0; i < total_moves && n < MAX_MOVES - 1; i++) {
+        if (buf_area[i].captured != EMPTY || buf_area[i].promotion != EMPTY) {
+            moves[n++] = buf_area[i];
+        }
+    }
+    return n;
+}
+
+int generate_legal_noisy(Position* pos, Move* moves) {
+    if (!pos || !moves) return 0;
+
+    Move pseudo[MAX_MOVES];
+    int pseudo_count = generate_noisy_moves(pos, pseudo);
+
+    int legal_count = 0;
+    for (int i = 0; i < pseudo_count && legal_count < MAX_MOVES - 1; i++) {
+        if (is_legal_move(pos, &pseudo[i])) {
+            moves[legal_count++] = pseudo[i];
+        }
+    }
     return legal_count;
 }
 

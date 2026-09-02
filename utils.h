@@ -15,6 +15,10 @@
 
 #define MAX_QUIESCENCE_DEPTH 8
 
+#define EXT_MAX 4
+
+#define PV_MAX_PLY (MAX_DEPTH + EXT_MAX + 2)
+
 #define MAX_UCI_LINE 8192
 
 struct timeval get_wall_time(void);
