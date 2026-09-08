@@ -212,54 +212,35 @@ int evaluate_open_files_near_king(Position* pos, int king_square, Color color) {
 int count_attackers_near_king(Position* pos, int king_square, Color attacking_color) {
     if (!pos || king_square < 0) return 0;
 
+    const Bitboard danger_zone = get_king_danger_zone(king_square);
+    if (!danger_zone) return 0;
+
     int attackers = 0;
-    Bitboard danger_zone = get_king_danger_zone(king_square);
 
-    for (PieceType piece = PAWN; piece <= QUEEN; piece++) {
-        Bitboard pieces = pos->pieces[attacking_color][piece];
-        while (pieces) {
-            int square = get_lsb(pieces);
+    const Bitboard pawn_squares = (attacking_color == WHITE)
+        ? (((danger_zone & ~file_masks[7]) >> 7) | ((danger_zone & ~file_masks[0]) >> 9))
+        : (((danger_zone & ~file_masks[7]) << 9) | ((danger_zone & ~file_masks[0]) << 7));
+    attackers += __builtin_popcountll(pos->pieces[attacking_color][PAWN] & pawn_squares);
 
-            Bitboard attacks = 0;
-            switch (piece) {
-                case PAWN: {
-
-                    Bitboard pawn_bb = 1ULL << square;
-                    if (attacking_color == WHITE) {
-                        attacks |= ((pawn_bb & ~file_masks[0]) << 7) |
-                                   ((pawn_bb & ~file_masks[7]) << 9);
-                    } else {
-                        attacks |= ((pawn_bb & ~file_masks[0]) >> 9) |
-                                   ((pawn_bb & ~file_masks[7]) >> 7);
-                    }
-                    break;
-                }
-                case KNIGHT: {
-
-                    attacks |= knight_attacks[square];
-                    break;
-                }
-                case BISHOP:
-                case ROOK:
-                case QUEEN: {
-
-                    if ((abs((square & 7) - (king_square & 7)) <= 2) ||
-                        (abs((square >> 3) - (king_square >> 3)) <= 2)) {
-                        attackers++;
-                    }
-                    break;
-                }
-                default:
-                    break;
-            }
-
-            if (attacks & danger_zone) {
-                attackers++;
-            }
-
-            pop_lsb(&pieces);
-        }
+    Bitboard knight_squares = 0;
+    Bitboard zone_bb = danger_zone;
+    while (zone_bb) {
+        knight_squares |= knight_attacks[get_lsb(zone_bb)];
+        pop_lsb(&zone_bb);
     }
+    attackers += __builtin_popcountll(pos->pieces[attacking_color][KNIGHT] & knight_squares);
+
+    const int kfile = king_square & 7;
+    const int krank = king_square >> 3;
+    Bitboard near_king = 0;
+    for (int f = (kfile > 2 ? kfile - 2 : 0); f <= (kfile < 5 ? kfile + 2 : 7); f++)
+        near_king |= file_masks[f];
+    for (int r = (krank > 2 ? krank - 2 : 0); r <= (krank < 5 ? krank + 2 : 7); r++)
+        near_king |= rank_masks[r];
+    const Bitboard slider_pieces = pos->pieces[attacking_color][ROOK]
+                           | pos->pieces[attacking_color][BISHOP]
+                           | pos->pieces[attacking_color][QUEEN];
+    attackers += __builtin_popcountll(slider_pieces & near_king);
 
     return attackers;
 }

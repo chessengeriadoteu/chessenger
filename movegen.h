@@ -35,6 +35,8 @@ int generate_en_passant_moves(Position* pos, Move* moves, int move_count);
 int generate_moves(Position* pos, Move* moves);
 int generate_legal_moves(Position* pos, Move* moves);
 
+bool has_legal_move(Position* pos);
+
 int generate_noisy_moves(Position* pos, Move* moves);
 int generate_legal_noisy(Position* pos, Move* moves);
 

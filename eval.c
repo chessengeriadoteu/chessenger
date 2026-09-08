@@ -66,7 +66,54 @@ static int evaluate_piece_square_tables_advanced(Position* pos) {
     return score;
 }
 
-static int evaluate_center_control_advanced(Position* pos) {
+typedef struct {
+    Bitboard attacks_from[64];
+    Bitboard combined[2];
+} AttackMaps;
+
+static void build_attack_maps(Position* pos, AttackMaps* m) {
+    const Bitboard occ = pos->all_pieces;
+
+    for (Color color = WHITE; color <= BLACK; color++) {
+        Bitboard combined = 0;
+
+        Bitboard b = pos->pieces[color][PAWN];
+        while (b) {
+            const int sq = get_lsb(b);
+            const Bitboard pawn_bit = 1ULL << sq;
+
+            const Bitboard a = (color == WHITE)
+                ? (((pawn_bit & ~file_masks[0]) << 7) | ((pawn_bit & ~file_masks[7]) << 9))
+                : (((pawn_bit & ~file_masks[0]) >> 9) | ((pawn_bit & ~file_masks[7]) >> 7));
+            m->attacks_from[sq] = a; combined |= a;
+            pop_lsb(&b);
+        }
+
+        b = pos->pieces[color][KNIGHT];
+        while (b) { const int sq = get_lsb(b); m->attacks_from[sq] = knight_attacks[sq]; combined |= knight_attacks[sq]; pop_lsb(&b); }
+
+        b = pos->pieces[color][KING];
+        while (b) { const int sq = get_lsb(b); m->attacks_from[sq] = king_attacks[sq]; combined |= king_attacks[sq]; pop_lsb(&b); }
+
+        b = pos->pieces[color][BISHOP];
+        while (b) { const int sq = get_lsb(b); const Bitboard a = get_bishop_attacks_public(sq, occ); m->attacks_from[sq] = a; combined |= a; pop_lsb(&b); }
+
+        b = pos->pieces[color][ROOK];
+        while (b) { const int sq = get_lsb(b); const Bitboard a = get_rook_attacks_public(sq, occ); m->attacks_from[sq] = a; combined |= a; pop_lsb(&b); }
+
+        b = pos->pieces[color][QUEEN];
+        while (b) {
+            const int sq = get_lsb(b);
+            const Bitboard a = get_rook_attacks_public(sq, occ) | get_bishop_attacks_public(sq, occ);
+            m->attacks_from[sq] = a; combined |= a;
+            pop_lsb(&b);
+        }
+
+        m->combined[color] = combined;
+    }
+}
+
+static int evaluate_center_control_advanced_m(Position* pos, const AttackMaps* maps) {
     if (!pos) return 0;
 
     int score = 0;
@@ -80,10 +127,7 @@ static int evaluate_center_control_advanced(Position* pos) {
         Bitboard pawns = pos->pieces[color][PAWN];
         while (pawns) {
 
-            Bitboard pawn = 1ULL << get_lsb(pawns);
-            Bitboard pawn_attacks = (color == WHITE)
-                ? (((pawn & ~file_masks[0]) << 7) | ((pawn & ~file_masks[7]) << 9))
-                : (((pawn & ~file_masks[0]) >> 9) | ((pawn & ~file_masks[7]) >> 7));
+            Bitboard pawn_attacks = maps->attacks_from[get_lsb(pawns)];
             center_control += __builtin_popcountll(pawn_attacks & center_squares);
             pop_lsb(&pawns);
         }
@@ -95,19 +139,7 @@ static int evaluate_center_control_advanced(Position* pos) {
             while (pieces) {
                 int square = get_lsb(pieces);
 
-                Bitboard attacks = 0;
-                if (piece == KNIGHT) {
-                    attacks = knight_attacks[square];
-                } else if (piece == BISHOP) {
-                    attacks = get_bishop_attacks_public(square, pos->all_pieces);
-                } else if (piece == ROOK) {
-                    attacks = get_rook_attacks_public(square, pos->all_pieces);
-                } else if (piece == QUEEN) {
-                    attacks = get_rook_attacks_public(square, pos->all_pieces) |
-                             get_bishop_attacks_public(square, pos->all_pieces);
-                } else if (piece == KING) {
-                    attacks = king_attacks[square];
-                }
+                Bitboard attacks = maps->attacks_from[square];
                 center_control += __builtin_popcountll(attacks & center_squares);
                 pop_lsb(&pieces);
             }
@@ -119,25 +151,7 @@ static int evaluate_center_control_advanced(Position* pos) {
     return score;
 }
 
-static int evaluate_piece_development(Position* pos) {
-    if (!pos) return 0;
-
-    int score = 0;
-
-    for (Color color = WHITE; color <= BLACK; color++) {
-        int color_multiplier = (color == WHITE) ? 1 : -1;
-
-        Bitboard back_rank = (color == WHITE) ? rank_masks[0] : rank_masks[7];
-        int developed_knights = __builtin_popcountll(pos->pieces[color][KNIGHT] & ~back_rank);
-        int developed_bishops = __builtin_popcountll(pos->pieces[color][BISHOP] & ~back_rank);
-
-        score += color_multiplier * (developed_knights + developed_bishops) * 25;
-    }
-
-    return score;
-}
-
-static int evaluate_pseudo_mobility(Position* pos) {
+static int evaluate_pseudo_mobility_m(Position* pos, const AttackMaps* maps) {
     if (!pos) return 0;
 
     int score = 0;
@@ -156,7 +170,7 @@ static int evaluate_pseudo_mobility(Position* pos) {
         Bitboard bishops = pos->pieces[color][BISHOP];
         while (bishops) {
             int square = get_lsb(bishops);
-            Bitboard attacks = get_bishop_attacks_public(square, pos->all_pieces);
+            Bitboard attacks = maps->attacks_from[square];
             mobility += __builtin_popcountll(attacks & ~pos->occupied[color]);
             pop_lsb(&bishops);
         }
@@ -164,55 +178,12 @@ static int evaluate_pseudo_mobility(Position* pos) {
         Bitboard rooks = pos->pieces[color][ROOK];
         while (rooks) {
             int square = get_lsb(rooks);
-            Bitboard attacks = get_rook_attacks_public(square, pos->all_pieces);
+            Bitboard attacks = maps->attacks_from[square];
             mobility += __builtin_popcountll(attacks & ~pos->occupied[color]);
             pop_lsb(&rooks);
         }
 
         score += color_multiplier * mobility * MOBILITY_BONUS_FACTOR;
-    }
-
-    return score;
-}
-
-static int evaluate_knight_outposts(Position* pos) {
-    if (!pos) return 0;
-
-    int score = 0;
-
-    Bitboard white_outposts = 0x00003C3C3C000000ULL;
-    Bitboard black_outposts = 0x0000003C3C3C0000ULL;
-
-    for (Color color = WHITE; color <= BLACK; color++) {
-        int color_multiplier = (color == WHITE) ? 1 : -1;
-        Bitboard outpost_squares = (color == WHITE) ? white_outposts : black_outposts;
-
-        Bitboard knights = pos->pieces[color][KNIGHT] & outpost_squares;
-        score += color_multiplier * __builtin_popcountll(knights) * KNIGHT_OUTPOST_BONUS;
-    }
-
-    return score;
-}
-
-static int evaluate_piece_activity_enhanced(Position* pos) {
-    if (!pos) return 0;
-
-    int score = 0;
-
-    for (Color color = WHITE; color <= BLACK; color++) {
-        int color_multiplier = (color == WHITE) ? 1 : -1;
-
-        Bitboard rooks = pos->pieces[color][ROOK];
-        while (rooks) {
-            int square = get_lsb(rooks);
-            int file = square % 8;
-
-            if (!(file_masks[file] & (pos->pieces[WHITE][PAWN] | pos->pieces[BLACK][PAWN]))) {
-                score += color_multiplier * ROOK_OPEN_FILE_BONUS;
-            }
-            pop_lsb(&rooks);
-        }
-
     }
 
     return score;
@@ -287,10 +258,12 @@ static int evaluate_pins_and_forks(Position* pos) {
     return score;
 }
 
-static int evaluate_check_patterns_enhanced(Position* pos) {
+static int evaluate_check_patterns_enhanced_m(Position* pos, const AttackMaps* maps) {
     if (!pos) return 0;
 
     int score = 0;
+
+    const GamePhase phase_sum = detect_game_phase(pos);
 
     for (Color color = WHITE; color <= BLACK; color++) {
         int color_multiplier = (color == WHITE) ? 1 : -1;
@@ -308,13 +281,12 @@ static int evaluate_check_patterns_enhanced(Position* pos) {
         while (queens) {
             int queen_square = get_lsb(queens);
 
-            Bitboard queen_attacks = get_queen_attacks_public(queen_square, pos->all_pieces);
+            Bitboard queen_attacks = maps->attacks_from[queen_square];
             if (queen_attacks & enemy_king) {
 
                 score += color_multiplier * 150;
 
-                GamePhase phase = detect_game_phase(pos);
-                if (phase != PHASE_ENDGAME) {
+                if (phase_sum != PHASE_ENDGAME) {
                     score += color_multiplier * 100;
                 }
 
@@ -331,7 +303,7 @@ static int evaluate_check_patterns_enhanced(Position* pos) {
         while (rooks) {
             int rook_square = get_lsb(rooks);
 
-            Bitboard rook_attacks = get_rook_attacks_public(rook_square, pos->all_pieces);
+            Bitboard rook_attacks = maps->attacks_from[rook_square];
             if (rook_attacks & enemy_king) {
                 score += color_multiplier * 80;
 
@@ -349,7 +321,7 @@ static int evaluate_check_patterns_enhanced(Position* pos) {
         while (bishops) {
             int bishop_square = get_lsb(bishops);
 
-            Bitboard bishop_attacks = get_bishop_attacks_public(bishop_square, pos->all_pieces);
+            Bitboard bishop_attacks = maps->attacks_from[bishop_square];
             if (bishop_attacks & enemy_king) {
                 score += color_multiplier * 70;
             }
@@ -373,38 +345,6 @@ static int evaluate_check_patterns_enhanced(Position* pos) {
 
             pop_lsb(&knights);
         }
-    }
-
-    return score;
-}
-
-static int evaluate_opening_principles(Position* pos) {
-    if (!pos) return 0;
-
-    if (detect_game_phase(pos) != PHASE_OPENING) return 0;
-
-    int score = 0;
-
-    for (Color color = WHITE; color <= BLACK; color++) {
-        int color_multiplier = (color == WHITE) ? 1 : -1;
-
-        if (pos->castling_rights & ((color == WHITE) ? 0x03 : 0x0C)) {
-            score += color_multiplier * CASTLING_RIGHTS_BONUS;
-        }
-
-        Bitboard queens = pos->pieces[color][QUEEN];
-        if (queens) {
-            int queen_square = get_lsb(queens);
-            int queen_rank = queen_square / 8;
-            int expected_rank = (color == WHITE) ? 0 : 7;
-
-            if (queen_rank != expected_rank) {
-                score += color_multiplier * QUEEN_EARLY_DEVELOPMENT_PENALTY;
-            }
-        }
-
-        Bitboard center_pawns = pos->pieces[color][PAWN] & 0x0000001818000000ULL;
-        score += color_multiplier * __builtin_popcountll(center_pawns) * CENTRAL_PAWN_DEVELOPMENT_BONUS;
     }
 
     return score;
@@ -482,6 +422,7 @@ int evaluate_material_threats(Position* pos) {
     return score;
 }
 
+static Bitboard attacked_squares_of(Position* pos, Color color) __attribute__((unused));
 static Bitboard attacked_squares_of(Position* pos, Color color) {
     Bitboard occ = pos->all_pieces;
 
@@ -507,15 +448,17 @@ static Bitboard attacked_squares_of(Position* pos, Color color) {
 
 int hung_penalty_stm = 0;
 
-int evaluate_hung_pieces(Position* pos) {
+static int evaluate_hung_pieces_m(Position* pos, const AttackMaps* maps) {
     hung_penalty_stm = 0;
     if (!pos) return 0;
 
     int score = 0;
 
+    const GamePhase phase_sum = detect_game_phase(pos);
+
     Bitboard attacked_by[2];
-    attacked_by[WHITE] = attacked_squares_of(pos, WHITE);
-    attacked_by[BLACK] = attacked_squares_of(pos, BLACK);
+    attacked_by[WHITE] = maps->combined[WHITE];
+    attacked_by[BLACK] = maps->combined[BLACK];
 
     for (Color color = WHITE; color <= BLACK; color++) {
         int color_multiplier = (color == WHITE) ? 1 : -1;
@@ -547,7 +490,7 @@ int evaluate_hung_pieces(Position* pos) {
 
                         if (color == pos->to_move) hung_penalty_stm += penalty;
 
-                        if (piece_type != PAWN && detect_game_phase(pos) == PHASE_OPENING) {
+                        if (piece_type != PAWN && phase_sum == PHASE_OPENING) {
                             score += color_multiplier * (-100);
                             if (color == pos->to_move) hung_penalty_stm += 100;
                         }
@@ -562,72 +505,299 @@ int evaluate_hung_pieces(Position* pos) {
     return score;
 }
 
-int evaluate_position(Position* pos) {
+static int evaluate_center_control_advanced(Position* pos) {
     if (!pos) return 0;
+    AttackMaps maps; build_attack_maps(pos, &maps);
+    return evaluate_center_control_advanced_m(pos, &maps);
+}
 
-    GamePhase phase = detect_game_phase(pos);
+static int evaluate_check_patterns_enhanced(Position* pos) {
+    if (!pos) return 0;
+    AttackMaps maps; build_attack_maps(pos, &maps);
+    return evaluate_check_patterns_enhanced_m(pos, &maps);
+}
+
+static int evaluate_pseudo_mobility(Position* pos) {
+    if (!pos) return 0;
+    AttackMaps maps; build_attack_maps(pos, &maps);
+    return evaluate_pseudo_mobility_m(pos, &maps);
+}
+
+int evaluate_hung_pieces(Position* pos) {
+    hung_penalty_stm = 0;
+    if (!pos) return 0;
+    AttackMaps maps; build_attack_maps(pos, &maps);
+    return evaluate_hung_pieces_m(pos, &maps);
+}
+
+static const int pst_mg_pawn[64] = {
+      0,   0,   0,   0,   0,   0,   0,   0,
+     98, 134,  61,  95,  68, 126,  34, -11,
+     -6,   7,  26,  31,  65,  56,  25, -20,
+    -14,  13,   6,  21,  23,  12,  17, -23,
+    -27,  -2,  -5,  12,  17,   6,  10, -25,
+    -26,  -4,  -4, -10,   3,   3,  33, -12,
+    -35,  -1, -20, -23, -15,  24,  38, -22,
+      0,   0,   0,   0,   0,   0,   0,   0,
+};
+static const int pst_eg_pawn[64] = {
+      0,   0,   0,   0,   0,   0,   0,   0,
+    178, 173, 158, 134, 147, 132, 165, 187,
+     94, 100,  85,  67,  56,  53,  82,  84,
+     32,  24,  13,   5,  -2,   4,  17,  17,
+     13,   9,  -3,  -7,  -7,  -8,   3,  -1,
+      4,   7,  -6,   1,   0,  -5,  -1,  -8,
+     13,   8,   8,  10,  13,   0,   2,  -7,
+      0,   0,   0,   0,   0,   0,   0,   0,
+};
+static const int pst_mg_knight[64] = {
+   -167, -89, -34, -49,  61, -97, -15, -107,
+    -73, -41,  72,  36,  23,  62,   7,  -17,
+    -47,  60,  37,  65,  84, 129,  73,   44,
+     -9,  17,  19,  53,  37,  69,  18,   22,
+    -13,   4,  16,  13,  28,  19,  21,   -8,
+    -23,  -9,  12,  10,  19,  17,  25,  -16,
+    -29, -53, -12,  -3,  -1,  18, -14,  -19,
+   -105, -21, -58, -33, -17, -28, -19,  -23,
+};
+static const int pst_eg_knight[64] = {
+    -58, -38, -13, -28, -31, -27, -63, -99,
+    -25,  -8, -25,  -2,  -9, -25, -24, -52,
+    -24, -20,  10,   9,  -1,  -9, -19, -41,
+    -17,   3,  22,  22,  22,  11,   8, -18,
+    -18,  -6,  16,  25,  16,  17,   4, -18,
+    -23,  -3,  -1,  15,  10,  -3, -20, -22,
+    -42, -20, -10,  -5,  -2, -20, -23, -44,
+    -29, -51, -23, -15, -22, -18, -50, -64,
+};
+static const int pst_mg_bishop[64] = {
+    -29,   4, -82, -37, -25, -42,   7,  -8,
+    -26,  16, -18, -13,  30,  59,  18, -47,
+    -16,  37,  43,  40,  35,  50,  37,  -2,
+     -4,   5,  19,  50,  37,  37,   7,  -2,
+     -6,  13,  13,  26,  34,  12,  10,   4,
+      0,  15,  15,  15,  14,  27,  18,  10,
+      4,  15,  16,   0,   7,  21,  33,   1,
+    -33,  -3, -14, -21, -13, -12, -39, -21,
+};
+static const int pst_eg_bishop[64] = {
+    -14, -21, -11,  -8,  -7,  -9, -17, -24,
+     -8,  -4,   7, -12,  -3, -13,  -4, -14,
+      2,  -8,   0,  -1,  -2,   6,   0,   4,
+     -3,   9,  12,   9,  14,  10,   3,   2,
+     -6,   3,  13,  19,   7,  10,  -3,  -9,
+    -12,  -3,   8,  10,  13,   3,  -7, -15,
+    -14, -18,  -7,  -1,   4,  -9, -15, -27,
+    -23,  -9, -23,  -5,  -9, -16,  -5, -17,
+};
+static const int pst_mg_rook[64] = {
+     32,  42,  32,  51,  63,   9,  31,  43,
+     27,  32,  58,  62,  80,  67,  26,  44,
+     -5,  19,  26,  36,  17,  45,  61,  16,
+    -24, -11,   7,  26,  24,  35,  -8, -20,
+    -36, -26, -12,  -1,   9,  -7,   6, -23,
+    -45, -25, -16, -17,   3,   0,  -5, -33,
+    -44, -16, -20,  -9,  -1,  11,  -6, -71,
+    -19, -13,   1,  17,  16,   7, -37, -26,
+};
+static const int pst_eg_rook[64] = {
+     13,  10,  18,  15,  12,  12,   8,   5,
+     11,  13,  13,  11,  -3,   3,   8,   3,
+      7,   7,   7,   5,   4,  -3,  -5,  -3,
+      4,   3,  13,   1,   2,   1,  -1,   2,
+      3,   5,   8,   4,  -5,  -6,  -8, -11,
+     -4,   0,  -5,  -1,  -7, -12,  -8, -16,
+     -6,  -6,   0,   2,  -9,  -9, -11,  -3,
+     -9,   2,   3,  -1,  -5, -13,   4, -20,
+};
+static const int pst_mg_queen[64] = {
+    -28,   0,  29,  12,  59,  44,  43,  45,
+    -24, -39,  -5,   1, -16,  57,  28,  54,
+    -13, -17,   7,   8,  29,  56,  47,  57,
+    -27, -27, -16, -16,  -1,  17,  -2,   1,
+     -9, -26,  -9, -10,  -2,  -4,   3,  -3,
+    -14,   2, -11,  -2,  -5,   2,  14,   5,
+    -35,  -8,  11,   2,   8,  15,  -3,   1,
+     -1, -18,  -9,  10, -15, -25, -31, -50,
+};
+static const int pst_eg_queen[64] = {
+     -9,  22,  22,  27,  27,  19,  10,  20,
+    -17,  20,  32,  41,  58,  25,  30,   0,
+    -20,   6,   9,  49,  47,  35,  19,   9,
+      3,  22,  24,  45,  57,  40,  57,  36,
+    -18,  28,  19,  47,  31,  34,  39,  23,
+    -16, -27,  15,   6,   9,  17,  10,   5,
+    -22, -23, -30, -16, -16, -23, -36, -32,
+    -33, -28, -22, -43,  -5, -32, -20, -41,
+};
+static const int pst_mg_king[64] = {
+    -65,  23,  16, -15, -56, -34,   2,  13,
+     29,  -1, -20,  -7,  -8,  -4, -38, -29,
+     -9,  24,   2, -16, -20,   6,  22, -22,
+    -17, -20, -12, -27, -30, -25, -14, -36,
+    -49,  -1, -27, -39, -46, -44, -33, -51,
+    -14, -14, -22, -46, -44, -30, -15, -27,
+      1,   7,  -8, -64, -43, -16,   9,   8,
+    -15,  36,  12, -54,   8, -28,  24,  14,
+};
+static const int pst_eg_king[64] = {
+    -74, -35, -18, -18, -11,  15,   4, -17,
+    -12,  17,  14,  17,  17,  38,  23,  11,
+     10,  17,  23,  15,  20,  45,  44,  13,
+     -8,  22,  24,  27,  26,  33,  26,   3,
+    -18,  -4,  21,  24,  27,  23,   9, -11,
+    -19,  -3,  11,  21,  23,  16,   7,  -9,
+    -27, -11,   4,  13,  14,   4,  -5, -17,
+    -53, -34, -21, -11, -28, -14, -24, -43,
+};
+
+static const int* const pst_mg_tables[6] = { pst_mg_pawn, pst_mg_rook, pst_mg_knight,
+                                         pst_mg_bishop, pst_mg_queen, pst_mg_king };
+static const int* const pst_eg_tables[6] = { pst_eg_pawn, pst_eg_rook, pst_eg_knight,
+                                         pst_eg_bishop, pst_eg_queen, pst_eg_king };
+
+static const int eval_piece_value[6] = { PAWN_VALUE, ROOK_VALUE, KNIGHT_VALUE,
+                                   BISHOP_VALUE, QUEEN_VALUE, KING_VALUE };
+
+static const int passed_bonus_mg[8] = { 0,  5, 10, 20,  35,  60, 100, 0 };
+static const int passed_bonus_eg[8] = { 0, 10, 20, 35,  60, 100, 160, 0 };
+
+static const int mobility_mg[6] = { 0, 3, 4, 4, 2, 0 };
+static const int mobility_eg[6] = { 0, 4, 4, 5, 4, 0 };
+
+static const int king_zone_weight[6]  = { 0, 3, 2, 2, 5, 0 };
+
+static Bitboard passed_span_mask[2][64];
+static Bitboard file_mask_of_sq[64];
+static bool pawn_masks_ready = false;
+
+static void build_pawn_masks(void) {
+    for (int sq = 0; sq < 64; sq++) {
+        const int file_idx = sq % 8;
+        const int rank_idx = sq / 8;
+        Bitboard files_bb = 0x0101010101010101ULL << file_idx;
+        file_mask_of_sq[sq] = files_bb;
+        if (file_idx > 0) files_bb |= 0x0101010101010101ULL << (file_idx - 1);
+        if (file_idx < 7) files_bb |= 0x0101010101010101ULL << (file_idx + 1);
+
+        Bitboard ahead_white = (rank_idx == 7) ? 0ULL : (~0ULL << (8 * (rank_idx + 1)));
+        Bitboard ahead_black = (rank_idx == 0) ? 0ULL : ((1ULL << (8 * rank_idx)) - 1);
+        passed_span_mask[WHITE][sq] = files_bb & ahead_white;
+        passed_span_mask[BLACK][sq] = files_bb & ahead_black;
+    }
+    pawn_masks_ready = true;
+}
+
+static inline Bitboard pawn_set_attacks(Bitboard pawns_bb, Color side_c) {
+    const Bitboard not_a_file = pawns_bb & ~0x0101010101010101ULL;
+    const Bitboard not_h_file = pawns_bb & ~0x8080808080808080ULL;
+    return (side_c == WHITE) ? ((not_a_file << 7) | (not_h_file << 9))
+                            : ((not_h_file >> 7) | (not_a_file >> 9));
+}
+
+static int eval_tapered(Position* pos) {
+    if (!pawn_masks_ready) build_pawn_masks();
+
     const int p256 = game_phase_256(pos);
+    const Bitboard occ_all = pos->all_pieces;
 
-    EvaluationWeights weights = get_evaluation_weights_tapered(p256);
+    int material = 0;
+    int mg_pst = 0, eg_pst = 0;
+    int mg_passed = 0, eg_passed = 0;
+    int mg_mob = 0, eg_mob = 0;
+    int zone_bb[2] = { 0, 0 };
 
-    int material = evaluate_material_count(pos);
-    int pst = evaluate_piece_square_tables_advanced(pos);
-    int pawns = evaluate_pawn_structure(pos);
-    int king_safety = evaluate_king_safety(pos);
-    int center_control = evaluate_center_control_advanced(pos);
-    int development = evaluate_piece_development(pos);
-    int mobility = evaluate_pseudo_mobility(pos);
-    int knight_outposts = evaluate_knight_outposts(pos);
-    int piece_activity = evaluate_piece_activity_enhanced(pos);
-    int pins_and_forks = evaluate_pins_and_forks(pos);
-    int check_patterns = evaluate_check_patterns_enhanced(pos);
+    Bitboard pawn_att[2];
+    pawn_att[WHITE] = pawn_set_attacks(pos->pieces[WHITE][PAWN], WHITE);
+    pawn_att[BLACK] = pawn_set_attacks(pos->pieces[BLACK][PAWN], BLACK);
 
-    int anti_grabby = evaluate_anti_grabby_patterns(pos);
-    int hung_pieces = evaluate_hung_pieces(pos);
-    int opening_principles = evaluate_opening_principles(pos);
+    Bitboard king_zone[2];
+    for (Color k = WHITE; k <= BLACK; k++) {
+        const Bitboard king_bb1 = pos->pieces[k][KING];
+        const int king_sq_v = king_bb1 ? get_lsb(king_bb1) : -1;
+        king_zone[k] = (king_sq_v >= 0) ? (king_attacks[king_sq_v] | king_bb1) : 0ULL;
+    }
 
-    int weighted_material = (int)(material * weights.material);
-    int weighted_pst = (int)(pst * weights.pst);
-    int weighted_pawns = (int)(pawns * weights.pawns);
-    int weighted_king_safety = (int)(king_safety * weights.king_safety);
-    int weighted_center = (int)(center_control * weights.center_control);
-    int weighted_development = (int)(development * weights.development);
-    int weighted_mobility = (int)(mobility * weights.mobility);
-    int weighted_activity = (int)((piece_activity + knight_outposts) * weights.piece_activity);
-    int weighted_tactical = (int)((pins_and_forks + check_patterns) * weights.tactical);
+    for (Color side_c = WHITE; side_c <= BLACK; side_c++) {
+        const int sign = (side_c == WHITE) ? 1 : -1;
+        const Color enemy_side = (side_c == WHITE) ? BLACK : WHITE;
 
-    int total_score = weighted_material + weighted_pst + weighted_pawns +
-                     weighted_king_safety + weighted_center + weighted_development +
-                     weighted_mobility + weighted_activity + weighted_tactical +
-                     anti_grabby + opening_principles + hung_pieces;
+        for (PieceType ptype = PAWN; ptype <= KING; ptype++) {
+            Bitboard bb = pos->pieces[side_c][ptype];
+            material += sign * __builtin_popcountll(bb) * eval_piece_value[ptype];
+
+            while (bb) {
+                const int sq = get_lsb(bb);
+                pop_lsb(&bb);
+                const int sq_pst = (side_c == WHITE) ? (sq ^ 56) : sq;
+
+                mg_pst += sign * pst_mg_tables[ptype][sq_pst];
+                eg_pst += sign * pst_eg_tables[ptype][sq_pst];
+
+                if (ptype == PAWN) {
+
+                    if (!(passed_span_mask[side_c][sq] & pos->pieces[enemy_side][PAWN])) {
+                        const int rel_rank = (side_c == WHITE) ? (sq / 8) - 1 : 6 - (sq / 8);
+                        const int r = (rel_rank < 0) ? 0 : (rel_rank > 7 ? 7 : rel_rank);
+                        mg_passed += sign * passed_bonus_mg[r];
+                        eg_passed += sign * passed_bonus_eg[r];
+                    }
+                    continue;
+                }
+                if (ptype == KING) continue;
+
+                Bitboard att_bb;
+                switch (ptype) {
+                    case KNIGHT: att_bb = knight_attacks[sq];                     break;
+                    case BISHOP: att_bb = get_bishop_attacks_public(sq, occ_all);  break;
+                    case ROOK:   att_bb = get_rook_attacks_public(sq, occ_all);    break;
+                    case QUEEN:  att_bb = get_queen_attacks_public(sq, occ_all);   break;
+                    default:     att_bb = 0ULL;                                   break;
+                }
+                const Bitboard mob_squares = att_bb & ~pos->occupied[side_c] & ~pawn_att[enemy_side];
+                const int n = __builtin_popcountll(mob_squares);
+                mg_mob += sign * n * mobility_mg[ptype];
+                eg_mob += sign * n * mobility_eg[ptype];
+
+                const int zone_hits = __builtin_popcountll(att_bb & king_zone[enemy_side]);
+                if (zone_hits) zone_bb[enemy_side] += zone_hits * king_zone_weight[ptype];
+            }
+        }
+    }
+
+    const int king_zone_penalty = (zone_bb[BLACK] - zone_bb[WHITE]) * p256 / 256;
+
+    const int mg = mg_pst + mg_passed + mg_mob;
+    const int eg = eg_pst + eg_passed + eg_mob;
+    const int positional = (mg * p256 + eg * (256 - p256)) / 256;
+    const int total = material + positional + king_zone_penalty;
 
     if (eval_debug_enabled) {
-        const char* phase_name = (phase == PHASE_OPENING) ?
-                                "OPENING" :
-                                (phase == PHASE_MIDDLEGAME) ? "MIDDLEGAME" : "ENDGAME";
+
+        const int pst_t   = (mg_pst   * p256 + eg_pst   * (256 - p256)) / 256;
+        const int pawns_t = (mg_passed * p256 + eg_passed * (256 - p256)) / 256;
+        const int mob_t   = (mg_mob   * p256 + eg_mob   * (256 - p256)) / 256;
         printf("DEBUG: ================================\n");
-        printf("DEBUG: EVALUATION BREAKDOWN\n");
-        printf("DEBUG: Game phase: %s\n", phase_name);
+        printf("DEBUG: EVALUATION BREAKDOWN (TAPERED)\n");
+        printf("DEBUG: Game phase: %d/256\n", p256);
         printf("DEBUG: ================================\n");
-        printf("DEBUG:   Material:      %+d (%.1fx) = %+d\n", material, weights.material, weighted_material);
-        printf("DEBUG:   PST:           %+d (%.1fx) = %+d\n", pst, weights.pst, weighted_pst);
-        printf("DEBUG:   Pawns:         %+d (%.1fx) = %+d\n", pawns, weights.pawns, weighted_pawns);
-        printf("DEBUG:   King Safety:   %+d (%.1fx) = %+d\n", king_safety, weights.king_safety, weighted_king_safety);
-        printf("DEBUG:   Center:        %+d (%.1fx) = %+d\n", center_control, weights.center_control, weighted_center);
-        printf("DEBUG:   Development:   %+d (%.1fx) = %+d\n", development, weights.development, weighted_development);
-        printf("DEBUG:   Mobility:      %+d (%.1fx) = %+d\n", mobility, weights.mobility, weighted_mobility);
-        printf("DEBUG:   Activity:      %+d (%.1fx) = %+d\n", piece_activity + knight_outposts, weights.piece_activity, weighted_activity);
-        printf("DEBUG:   Tactical:      %+d (%.1fx) = %+d\n", pins_and_forks + check_patterns, weights.tactical, weighted_tactical);
-        printf("DEBUG:   Anti-grabby:   %+d\n", anti_grabby);
-        printf("DEBUG:   Opening Princ: %+d\n", opening_principles);
-        printf("DEBUG:   Hung Pieces:   %+d\n", hung_pieces);
-        printf("DEBUG:   TOTAL:         %+d\n", total_score);
+        printf("DEBUG:   Material:      %+d\n", material);
+        printf("DEBUG:   PST:           %+d\n", pst_t);
+        printf("DEBUG:   Pawns:         %+d\n", pawns_t);
+        printf("DEBUG:   Mobility:      %+d\n", mob_t);
+        printf("DEBUG:   King Safety:   %+d\n", king_zone_penalty);
+        printf("DEBUG:   TOTAL:         %+d\n", total);
         printf("DEBUG:   Perspective:   %s\n", pos->to_move == WHITE ? "WHITE" : "BLACK");
-        printf("DEBUG:   Final:         %+d\n", (pos->to_move == WHITE) ? total_score : -total_score);
+        printf("DEBUG:   Final:         %+d\n", (pos->to_move == WHITE) ? total : -total);
         printf("DEBUG: ================================\n\n");
     }
 
-    return (pos->to_move == WHITE) ? total_score : -total_score;
+    return (pos->to_move == WHITE) ? total : -total;
+}
+
+int evaluate_position(Position* pos) {
+    if (!pos) return 0;
+    return eval_tapered(pos);
 }
 
 int evaluate_material(Position* pos) {

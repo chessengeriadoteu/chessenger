@@ -9,7 +9,9 @@
 #include <stdbool.h>
 #include <sys/time.h>
 
-#define HISTORY_MAX_SCORE 10000
+#define HISTORY_GRAVITY_MAX 512
+
+#define RFP_MAX_DEPTH 4
 
 typedef struct {
     struct timeval start_time;
@@ -26,6 +28,7 @@ void store_killer(int ply, Move move);
 bool is_killer_move(int ply, Move move);
 void init_history(void);
 void clear_history(void);
+void new_search_reset(void);
 void update_history(Move move, int depth, bool good_move);
 int get_history_score(Move move);
 void age_history(void);

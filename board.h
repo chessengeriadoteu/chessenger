@@ -7,6 +7,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define DECISIVE_STOP_MIN_DEPTH 10
+
 typedef uint64_t Bitboard;
 typedef enum { WHITE, BLACK } Color;
 typedef enum { PAWN, ROOK, KNIGHT, BISHOP, QUEEN, KING, EMPTY } PieceType;

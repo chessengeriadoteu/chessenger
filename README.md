@@ -1,11 +1,11 @@
-# Chessenger 0.4
+# Chessenger 0.5
 
 Chessenger is a UCI chess engine in C99, written by AI coding assistants under the direction of Dariusz Domagała
 (see [How Chessenger is made](#how-chessenger-is-made)).
 
-- Version: 0.4 (code date 2026-09-02)
-- Strength: 2186.24 [2143.17, 2229.32] (chained anchor, run A76)
-- What is new: First UCI options (Hash, MultiPV, Clear Hash, Ponder); search and move ordering work.
+- Version: 0.5 (code date 2026-09-08)
+- Strength: 2593.14 [2574.00, 2612.63] (run A111: 1000 games against Fruit 1.0, MCERL 2536)
+- What is new: New evaluation built on the PeSTO piece-square tables.
 
 ## How Chessenger is made
 
@@ -40,7 +40,7 @@ which the author maintains. Chessenger played with one thread. A rating is the o
 Elo difference measured in the games, and it belongs to the measured binary. MCERL ratings are not directly
 comparable with other rating lists such as CCRL or CEGT.
 
-A chain on one machine (MacBook Pro M1 Pro), 2 s + 0.2 s per move: an earlier development build played 500 games against Schildkroete 180209 (MCERL 2024) and was rated 2035.82; three runs of Chessenger against itself (Hash 128 MB), each between consecutive development builds, added +26.11, +57.86 and +66.46 Elo. This version is the last link; it was not measured directly against a rated engine.
+1000 games against Fruit 1.0 (MCERL 2536) at 2 s + 0.2 s per move, Hash 128 MB, on a Mac mini M4 Pro: +57.14 Elo, so 2536 + 57.14 = 2593.14.
 
 ## About the source
 
@@ -64,15 +64,15 @@ make release    # all binaries into dist/ (Linux and Windows need zig)
 
 | File | For |
 |---|---|
-| `chessenger-0.4-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
-| `chessenger-0.4-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
-| `chessenger-0.4-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
-| `chessenger-0.4-linux-arm64.tar.gz` | Linux, ARM64 (static) |
-| `chessenger-0.4-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
-| `chessenger-0.4-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
-| `chessenger-0.4-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
-| `chessenger-0.4-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
-| `chessenger-0.4-windows-arm64.zip` | Windows on ARM (ARM64) |
+| `chessenger-0.5-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
+| `chessenger-0.5-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
+| `chessenger-0.5-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
+| `chessenger-0.5-linux-arm64.tar.gz` | Linux, ARM64 (static) |
+| `chessenger-0.5-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
+| `chessenger-0.5-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
+| `chessenger-0.5-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
+| `chessenger-0.5-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
+| `chessenger-0.5-windows-arm64.zip` | Windows on ARM (ARM64) |
 
 Each archive holds the binary, `LICENSE`, `README.md` and, where the version has one, `LICENSES/`.
 
@@ -81,7 +81,7 @@ If unsure on Windows, take `avx2`; on Windows on ARM, take `arm64`.
 ## UCI
 
 Use Chessenger with a UCI chess GUI or from the command line.
-The engine reports itself as `id name Chessenger 0.4`.
+The engine reports itself as `id name Chessenger 0.5`.
 
 ### Commands
 
@@ -122,6 +122,7 @@ Commands outside the UCI protocol, for testing:
 ## Thanks
 
 - Oliver Brausch, for OliThink 5.10.5: our null-move reduction, singular extension, late move reduction, late move pruning, SEE pruning and history pruning use its formulas and values.
+- Ronald Friederich, for PeSTO's piece-square tables.
 - Tomasz Michniewski, for the Simplified Evaluation Function on the Chess Programming Wiki, whose piece-square tables our `eval_data.h` is based on.
 - The Chess Programming Wiki and its authors.
 

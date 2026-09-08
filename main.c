@@ -16,7 +16,7 @@
 #include "utils.h"
 #include "search.h"
 
-#define ENGINE_VERSION "0.4"
+#define ENGINE_VERSION "0.5"
 
 bool position_changed = false;
 bool stop_requested = false;
@@ -823,6 +823,7 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
 
     set_search_time_limit(time_limit_ms);
     start_search_timer();
+    new_search_reset();
 
     struct timeval start_time = get_wall_time();
     Move best_move = {0};
@@ -830,6 +831,10 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
     int previous_score = 0;
 
     long long nodes_total = 0;
+
+    int  decisive_last_score = 0;
+    int  decisive_last_depth = 0;
+    bool decisive_have_iter  = false;
 
     for (int depth = 1; depth <= MAX_DEPTH; depth++) {
 
@@ -881,10 +886,15 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
             break;
         }
 
-        if (depth >= 6) {
-            if (info.score > 800) break;
-            if (info.score < -800) break;
+        if (depth >= DECISIVE_STOP_MIN_DEPTH && (info.score > 800 || info.score < -800)) {
+            if (decisive_have_iter && decisive_last_depth == depth - 1
+                                      && decisive_last_score == info.score) {
+                break;
+            }
         }
+        decisive_last_score = info.score;
+        decisive_last_depth = depth;
+        decisive_have_iter  = true;
     }
 
     return valid_move_found ? best_move : (Move){0};
@@ -1290,6 +1300,7 @@ int main() {
 
                 set_search_time_limit(0);
                 start_search_timer();
+    new_search_reset();
 
                 set_search_unbounded(true);
 
@@ -1421,6 +1432,7 @@ int main() {
 
                 set_search_time_limit(0);
                 start_search_timer();
+    new_search_reset();
 
                 int depth_target = parse_depth(input);
 

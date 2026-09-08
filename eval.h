@@ -11,6 +11,7 @@
 #define KNIGHT_VALUE 320
 #define BISHOP_VALUE 330
 #define QUEEN_VALUE  1000
+#define KING_VALUE   0
 
 #define BISHOP_PAIR_BONUS 50
 
@@ -25,6 +26,7 @@ int evaluate_piece_square_tables(Position* pos);
 int evaluate_pawn_structure(Position* pos);
 int evaluate_king_safety(Position* pos);
 int evaluate_mobility(Position* pos);
+
 int evaluate_center_control(Position* pos);
 int evaluate_tactical_patterns(Position* pos);
 

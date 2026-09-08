@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND MIT
  * Copyright (C) Dariusz Domagała
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
- * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-09-02.
+ * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-09-08.
  */
 #include "search.h"
 #include "board.h"
@@ -25,6 +25,7 @@ int win_stdin_read(int fd, void* buf, unsigned int count);
 
 #define FULL_MOVES_TO_SEARCH 3
 #define MIN_LMR_DEPTH 2
+
 #define CHECK_STOP_FREQUENCY 4096
 
 #define MAX_TRIED_QUIETS 64
@@ -255,18 +256,22 @@ void clear_history(void) {
 
 void update_history(Move move, int depth, bool good_move) {
     if (move.from >= 0 && move.from < 64 && move.to >= 0 && move.to < 64) {
-        if (good_move) {
-            history_table[move.from][move.to] += depth * depth;
-            if (history_table[move.from][move.to] > HISTORY_MAX_SCORE) {
-                history_table[move.from][move.to] = HISTORY_MAX_SCORE;
-            }
-        } else {
-            history_table[move.from][move.to] -= depth;
-            if (history_table[move.from][move.to] < 0) {
-                history_table[move.from][move.to] = 0;
-            }
-        }
+
+        int b = depth * depth;
+        if (b > HISTORY_GRAVITY_MAX) b = HISTORY_GRAVITY_MAX;
+        if (!good_move) b = -b;
+        int h = history_table[move.from][move.to];
+        h += b - h * (b < 0 ? -b : b) / HISTORY_GRAVITY_MAX;
+        if (h >  HISTORY_GRAVITY_MAX) h =  HISTORY_GRAVITY_MAX;
+        if (h < -HISTORY_GRAVITY_MAX) h = -HISTORY_GRAVITY_MAX;
+        history_table[move.from][move.to] = h;
     }
+}
+
+void new_search_reset(void) {
+    init_history();
+
+    clear_killers();
 }
 
 int get_history_score(Move move) {
@@ -305,7 +310,7 @@ int piece_value(int piece) {
     }
 }
 
-#define QS_CHECK_PLIES 2
+#define QS_CHECK_PLIES 0
 
 int quiescence_search(Position* pos, int alpha, int beta, int ply, int qply, SearchInfo* info) {
     info->nodes++;
@@ -617,7 +622,7 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
         }
     }
 
-    if (depth <= 4 && !in_check && ply > 0 &&
+    if (depth <= RFP_MAX_DEPTH && !in_check && ply > 0 &&
         alpha > -MATE_SCORE + PV_MAX_PLY &&
         beta  <  MATE_SCORE - PV_MAX_PLY) {
 
@@ -736,10 +741,11 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
         int  see_val    = 0;
         bool see_done = false;
 
+        bool see_quiet_candidate = (move->promotion == EMPTY) && (beta - alpha == 1);
         if (i > 0 && depth <= 8 && !in_check &&
             alpha > -MATE_SCORE + PV_MAX_PLY &&
             beta  <  MATE_SCORE - PV_MAX_PLY &&
-            move->captured != EMPTY &&
+            (move->captured != EMPTY || see_quiet_candidate) &&
             !(tt_move.from == move->from && tt_move.to == move->to)) {
             see_val    = static_exchange_evaluation(pos, move);
             see_done = true;
@@ -779,6 +785,7 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
                              alpha > -MATE_SCORE + PV_MAX_PLY &&
                              beta  <  MATE_SCORE - PV_MAX_PLY;
             bool history_prune = false;
+
             if (i > FULL_MOVES_TO_SEARCH && depth >= MIN_LMR_DEPTH &&
                 !in_check && !gives_check && !found_pv &&
                 move->captured == EMPTY && move->promotion == EMPTY &&
@@ -786,7 +793,8 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
                 int his = get_history_score(*move);
                 if (his > hist_max) {
                     hist_max = his;
-                } else if (prune_ok && depth < 6 && his * his < hist_max) {
+
+                } else if (prune_ok && depth < 6 && (his < 0 || his * his < hist_max)) {
                     history_prune = true;
                 } else {
                     reduction = (depth + 1) / 3;

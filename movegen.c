@@ -637,6 +637,118 @@ bool is_en_passant_legal(Position* pos, Move* move) {
     return is_legal_move(pos, move);
 }
 
+static Bitboard checkers_of(Position* pos, int king_sq_idx, Color attacker_color);
+static Bitboard squares_between(int a, int b);
+
+typedef struct {
+    bool     usable;
+    Color    own_color, opp_color;
+    int      king_sq_idx;
+    int      num_checkers;
+    Bitboard target_bb;
+    Bitboard pinned_bb;
+    int      num_pinned;
+    int      pinned_sq[8];
+    Bitboard pin_ray[8];
+} LegalityContext;
+
+static bool square_attacked_occ(Position* pos, int at_sq, Color attacker_color, Bitboard occ) {
+    const Bitboard target_bb = 1ULL << at_sq;
+
+    Bitboard pawns_bb = pos->pieces[attacker_color][PAWN];
+    Bitboard pawn_attack_bb = (attacker_color == WHITE)
+        ? (((pawns_bb & ~file_masks[0]) << 7) | ((pawns_bb & ~file_masks[7]) << 9))
+        : (((pawns_bb & ~file_masks[0]) >> 9) | ((pawns_bb & ~file_masks[7]) >> 7));
+    if (pawn_attack_bb & target_bb) return true;
+
+    if (knight_attacks[at_sq] & pos->pieces[attacker_color][KNIGHT]) return true;
+    if (king_attacks[at_sq]   & pos->pieces[attacker_color][KING])   return true;
+
+    Bitboard rook_sliders = pos->pieces[attacker_color][ROOK] | pos->pieces[attacker_color][QUEEN];
+    if (rook_sliders && (get_rook_attacks(at_sq, occ) & rook_sliders)) return true;
+
+    Bitboard bishop_sliders = pos->pieces[attacker_color][BISHOP] | pos->pieces[attacker_color][QUEEN];
+    if (bishop_sliders && (get_bishop_attacks(at_sq, occ) & bishop_sliders)) return true;
+
+    return false;
+}
+
+static void legality_context_init(Position* pos, LegalityContext* k) {
+    k->num_pinned = 0;
+    k->pinned_bb = 0;
+    k->num_checkers = 0;
+    k->target_bb = ~0ULL;
+    k->own_color = pos->to_move;
+    k->opp_color  = 1 - k->own_color;
+
+    Bitboard king_bb1 = pos->pieces[k->own_color][KING];
+    if (king_bb1 == 0) { k->usable = false; k->king_sq_idx = -1; return; }
+    k->usable = true;
+    k->king_sq_idx = get_lsb(king_bb1);
+
+    const Bitboard checkers_bb = checkers_of(pos, k->king_sq_idx, k->opp_color);
+    k->num_checkers = __builtin_popcountll(checkers_bb);
+    if (k->num_checkers == 1) {
+
+        k->target_bb = checkers_bb | squares_between(k->king_sq_idx, get_lsb(checkers_bb));
+    } else if (k->num_checkers > 1) {
+        k->target_bb = 0;
+    }
+
+    const Bitboard rook_sliders = pos->pieces[k->opp_color][ROOK]   | pos->pieces[k->opp_color][QUEEN];
+    const Bitboard bishop_sliders = pos->pieces[k->opp_color][BISHOP] | pos->pieces[k->opp_color][QUEEN];
+    Bitboard snipers = (get_rook_attacks(k->king_sq_idx, 0ULL)   & rook_sliders)
+                       | (get_bishop_attacks(k->king_sq_idx, 0ULL) & bishop_sliders);
+
+    while (snipers) {
+        const int s = get_lsb(snipers);
+        snipers &= snipers - 1;
+        const Bitboard segment  = squares_between(k->king_sq_idx, s);
+        const Bitboard between_bb = segment & pos->all_pieces;
+        if (between_bb == 0) continue;
+        if (between_bb & (between_bb - 1)) continue;
+        if (!(between_bb & pos->occupied[k->own_color])) continue;
+        if (k->num_pinned >= 8) { k->usable = false; return; }
+        k->pinned_bb |= between_bb;
+        k->pinned_sq[k->num_pinned]    = get_lsb(between_bb);
+        k->pin_ray[k->num_pinned] = segment | (1ULL << s);
+        k->num_pinned++;
+    }
+}
+
+static bool is_legal_fast(Position* pos, Move* mv, const LegalityContext* k) {
+    if (!k->usable)                        return is_legal_move(pos, mv);
+    if (mv->is_en_passant || mv->is_castling) return is_legal_move(pos, mv);
+
+    if (mv->from == k->king_sq_idx) {
+        const Bitboard occ_no_king = pos->all_pieces ^ (1ULL << k->king_sq_idx);
+        return !square_attacked_occ(pos, mv->to, k->opp_color, occ_no_king);
+    }
+
+    if (k->num_checkers > 1)                     return false;
+    if (!((1ULL << mv->to) & k->target_bb))            return false;
+
+    if ((1ULL << mv->from) & k->pinned_bb) {
+        for (int i = 0; i < k->num_pinned; i++) {
+            if (k->pinned_sq[i] == mv->from)
+                return (k->pin_ray[i] & (1ULL << mv->to)) != 0;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool has_legal_move(Position* pos) {
+    Move move_list[256];
+    int n = generate_moves(pos, move_list);
+    LegalityContext legal_ctx;
+    legality_context_init(pos, &legal_ctx);
+    for (int i = 0; i < n; i++) {
+        if (is_legal_fast(pos, &move_list[i], &legal_ctx)) return true;
+    }
+    return false;
+}
+
 int generate_moves(Position* pos, Move* moves) {
     if (!pos || !moves) return 0;
 
@@ -656,10 +768,12 @@ int generate_legal_moves(Position* pos, Move* moves) {
 
     Move pseudo_moves[MAX_MOVES];
     int pseudo_count = generate_moves(pos, pseudo_moves);
+    LegalityContext legal_ctx;
+    legality_context_init(pos, &legal_ctx);
 
     int legal_count = 0;
     for (int i = 0; i < pseudo_count && legal_count < MAX_MOVES - 1; i++) {
-        if (is_legal_move(pos, &pseudo_moves[i])) {
+        if (is_legal_fast(pos, &pseudo_moves[i], &legal_ctx)) {
             moves[legal_count++] = pseudo_moves[i];
         }
     }
@@ -764,10 +878,12 @@ int generate_legal_evasions(Position* pos, Move* moves) {
 
     Move evasion_cands[MAX_MOVES];
     const int n = generate_check_evasions(pos, evasion_cands);
+    LegalityContext legal_ctx;
+    legality_context_init(pos, &legal_ctx);
 
     int legal_count = 0;
     for (int i = 0; i < n && legal_count < MAX_MOVES - 1; i++) {
-        if (is_legal_move(pos, &evasion_cands[i])) {
+        if (is_legal_fast(pos, &evasion_cands[i], &legal_ctx)) {
             moves[legal_count++] = evasion_cands[i];
         }
     }
@@ -798,10 +914,12 @@ int generate_legal_noisy(Position* pos, Move* moves) {
 
     Move pseudo[MAX_MOVES];
     int pseudo_count = generate_noisy_moves(pos, pseudo);
+    LegalityContext legal_ctx;
+    legality_context_init(pos, &legal_ctx);
 
     int legal_count = 0;
     for (int i = 0; i < pseudo_count && legal_count < MAX_MOVES - 1; i++) {
-        if (is_legal_move(pos, &pseudo[i])) {
+        if (is_legal_fast(pos, &pseudo[i], &legal_ctx)) {
             moves[legal_count++] = pseudo[i];
         }
     }
@@ -879,7 +997,10 @@ void score_moves_with_history(Move* moves, int move_count, Move hash_move, int p
     score_moves_with_killers(moves, move_count, hash_move, ply);
 
     for (int i = 0; i < move_count; i++) {
-        moves[i].score += get_history_score(moves[i]);
+        int his = get_history_score(moves[i]);
+
+        if (his < 0 && is_killer_move(ply, moves[i])) his = 0;
+        moves[i].score += his;
     }
 }
 
