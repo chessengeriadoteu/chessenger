@@ -16,7 +16,7 @@
 #include "utils.h"
 #include "search.h"
 
-#define ENGINE_VERSION "0.5"
+#define ENGINE_VERSION "0.8"
 
 bool position_changed = false;
 bool stop_requested = false;
@@ -700,6 +700,41 @@ static Move search_root_with_aspiration(Position* pos, int depth, int previous_s
     int delta = ASPIRATION_WINDOW;
     int alpha = ROOT_FULL_ALPHA;
     int beta  = ROOT_FULL_BETA;
+
+    {
+        Move best_found = {0};
+
+        delta = 18;
+        *window_open = false;
+        if (use_aspiration && depth > 6) {
+            alpha = previous_score - 13;
+            beta  = previous_score + 13;
+        }
+
+        while (true) {
+            if (alpha < -2 * QUEEN_VALUE) alpha = ROOT_FULL_ALPHA;
+            if (beta  >  2 * QUEEN_VALUE) beta  = ROOT_FULL_BETA;
+
+            best_found = search_single_depth_with_nodes(pos, depth, alpha, beta, info);
+
+            if (stop_requested || position_changed || is_time_exceeded()) {
+                *window_open = (info->score <= alpha && alpha > ROOT_FULL_ALPHA) ||
+                               (info->score >= beta  && beta  < ROOT_FULL_BETA);
+                break;
+            }
+
+            if (info->score <= alpha && alpha > ROOT_FULL_ALPHA) {
+                alpha -= delta;
+                beta   = (alpha + beta) / 2;
+            } else if (info->score >= beta && beta < ROOT_FULL_BETA) {
+                beta += delta;
+            } else {
+                break;
+            }
+            delta += delta * 2 / 3;
+        }
+        return best_found;
+    }
 
     if (use_aspiration) {
         alpha = previous_score - delta;

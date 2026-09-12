@@ -9,7 +9,7 @@ ZIG     ?= zig
 CFLAGS  := -std=c99 -O3 -flto -DNDEBUG -Wall -Wextra
 LDLIBS  := -lm
 ENGINE  := $(filter-out win_stdin.c,$(wildcard *.c))
-VERSION := 0.5
+VERSION := 0.8
 
 ifeq ($(OS),Windows_NT)
     ARCH    ?= -march=x86-64-v3

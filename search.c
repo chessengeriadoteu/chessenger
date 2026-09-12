@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND MIT
  * Copyright (C) Dariusz Domagała
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
- * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-09-08.
+ * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-09-12.
  */
+#define RFP_MARGIN 150
 #include "search.h"
 #include "board.h"
 #include "eval.h"
@@ -622,15 +623,14 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
         }
     }
 
-    if (depth <= RFP_MAX_DEPTH && !in_check && ply > 0 &&
-        alpha > -MATE_SCORE + PV_MAX_PLY &&
+    if (depth <= RFP_MAX_DEPTH && !in_check && ply > 0 && alpha > -MATE_SCORE + PV_MAX_PLY &&
         beta  <  MATE_SCORE - PV_MAX_PLY) {
 
         if (!have_static_eval) {
             static_eval = evaluate_position(pos);
             have_static_eval = true;
         }
-        int reverse_margin = 150 * depth;
+        int reverse_margin = RFP_MARGIN * depth;
         if (static_eval - reverse_margin >= beta) {
             return static_eval - reverse_margin;
         }
@@ -806,6 +806,7 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
             }
 
             if (history_prune) {
+
                 undo_move_full(pos, move, &undo);
                 continue;
             }
@@ -871,6 +872,7 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
             }
 
             if (score >= beta) {
+
                 if (move->captured == EMPTY && move->promotion == EMPTY) {
                     store_killer(ply, *move);
                     update_history(*move, depth, true);
@@ -937,6 +939,9 @@ bool is_root_included(const Move* m) {
 }
 
 Move search_single_depth_with_nodes(Position* pos, int depth, int alpha, int beta, SearchInfo* info) {
+
+    extern Move search_root(Position*, int, int, int, SearchInfo*, long long*, bool*);
+    return search_root(pos, depth, alpha, beta, info, &nodes_searched, &root_search_interrupted);
     Move moves[256];
     int move_count = generate_legal_moves(pos, moves);
 

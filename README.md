@@ -1,11 +1,11 @@
-# Chessenger 0.5
+# Chessenger 0.8
 
 Chessenger is a UCI chess engine in C99, written by AI coding assistants under the direction of Dariusz Domagała
 (see [How Chessenger is made](#how-chessenger-is-made)).
 
-- Version: 0.5 (code date 2026-09-08)
-- Strength: 2593.14 [2574.00, 2612.63] (run A111: 1000 games against Fruit 1.0, MCERL 2536)
-- What is new: New evaluation built on the PeSTO piece-square tables.
+- Version: 0.8 (code date 2026-09-12)
+- Strength: 2872.78 [2852.48, 2894.25] (run A119: 1000 games against Berserk 2.0.0, MCERL 2700)
+- What is new: New search adapted from OliThink 5.10.5; versions 0.6 and 0.7 were skipped on purpose.
 
 ## How Chessenger is made
 
@@ -40,7 +40,7 @@ which the author maintains. Chessenger played with one thread. A rating is the o
 Elo difference measured in the games, and it belongs to the measured binary. MCERL ratings are not directly
 comparable with other rating lists such as CCRL or CEGT.
 
-1000 games against Fruit 1.0 (MCERL 2536) at 2 s + 0.2 s per move, Hash 128 MB, on a Mac mini M4 Pro: +57.14 Elo, so 2536 + 57.14 = 2593.14.
+1000 games against Berserk 2.0.0 (MCERL 2700) at 2 s + 0.2 s per move, Hash 128 MB, on a Mac mini M4 Pro: +172.78 Elo, so 2700 + 172.78 = 2872.78.
 
 ## About the source
 
@@ -50,8 +50,6 @@ the same flags, the cleaned source and the original give the same binary. Identi
 translated into English; that changes names and text only, not the search (same nodes, moves and lines on the
 24 test positions). The published source builds an engine that searches exactly the same nodes and plays the
 same moves on those 24 positions as the measured binary.
-On Linux and Windows the C library orders moves with equal scores differently, so node counts there differ from
-macOS; the strength was measured on macOS.
 
 ## Build
 
@@ -64,15 +62,15 @@ make release    # all binaries into dist/ (Linux and Windows need zig)
 
 | File | For |
 |---|---|
-| `chessenger-0.5-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
-| `chessenger-0.5-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
-| `chessenger-0.5-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
-| `chessenger-0.5-linux-arm64.tar.gz` | Linux, ARM64 (static) |
-| `chessenger-0.5-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
-| `chessenger-0.5-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
-| `chessenger-0.5-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
-| `chessenger-0.5-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
-| `chessenger-0.5-windows-arm64.zip` | Windows on ARM (ARM64) |
+| `chessenger-0.8-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
+| `chessenger-0.8-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
+| `chessenger-0.8-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
+| `chessenger-0.8-linux-arm64.tar.gz` | Linux, ARM64 (static) |
+| `chessenger-0.8-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
+| `chessenger-0.8-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
+| `chessenger-0.8-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
+| `chessenger-0.8-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
+| `chessenger-0.8-windows-arm64.zip` | Windows on ARM (ARM64) |
 
 Each archive holds the binary, `LICENSE`, `README.md` and, where the version has one, `LICENSES/`.
 
@@ -81,7 +79,7 @@ If unsure on Windows, take `avx2`; on Windows on ARM, take `arm64`.
 ## UCI
 
 Use Chessenger with a UCI chess GUI or from the command line.
-The engine reports itself as `id name Chessenger 0.5`.
+The engine reports itself as `id name Chessenger 0.8`.
 
 ### Commands
 
@@ -121,7 +119,7 @@ Commands outside the UCI protocol, for testing:
 
 ## Thanks
 
-- Oliver Brausch, for OliThink 5.10.5: our null-move reduction, singular extension, late move reduction, late move pruning, SEE pruning and history pruning use its formulas and values.
+- Oliver Brausch, for OliThink 5.10.5, which our search is adapted from (MIT license, see `LICENSES/OLITHINK-MIT.txt`).
 - Ronald Friederich, for PeSTO's piece-square tables.
 - Tomasz Michniewski, for the Simplified Evaluation Function on the Chess Programming Wiki, whose piece-square tables our `eval_data.h` is based on.
 - The Chess Programming Wiki and its authors.
