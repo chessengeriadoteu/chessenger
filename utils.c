@@ -281,6 +281,7 @@ bool validate_move_before_send(Position* pos, Move* move) {
     return false;
 }
 
+__attribute__((unused))
 static Bitboard get_attackers_of_square(Position* pos, int square, Color color, Bitboard occupied) {
     if (!pos || square < 0 || square > 63) return 0;
 

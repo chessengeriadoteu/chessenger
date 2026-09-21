@@ -16,7 +16,7 @@
 #include "utils.h"
 #include "search.h"
 
-#define ENGINE_VERSION "0.8"
+#define ENGINE_VERSION "0.9"
 
 bool position_changed = false;
 bool stop_requested = false;
@@ -295,6 +295,10 @@ float assess_position_complexity(Position* pos) {
     return complexity > 2.0f ? 2.0f : complexity;
 }
 
+static int tm_flexible = 0;
+
+static int tm_hard_ms = 0;
+
 int calculate_search_time(int wtime, int btime, int winc, int binc, int movestogo, Color to_move, Position* pos) {
     int my_time = (to_move == WHITE) ? wtime : btime;
     int my_increment = (to_move == WHITE) ? winc : binc;
@@ -360,6 +364,8 @@ int calculate_search_time(int wtime, int btime, int winc, int binc, int movestog
         time_per_move = total_time_left / base_divisor;
         time_per_move += increment * 0.7f;
 
+        time_per_move = total_time_left / 30.0f + increment * 0.8f;
+
     } else {
 
         algorithm_type = "PHASE_BASED";
@@ -386,7 +392,7 @@ int calculate_search_time(int wtime, int btime, int winc, int binc, int movestog
         time_per_move += increment * 0.5f;
     }
 
-    float max_time_per_move = total_time_left * 0.4f;
+    float max_time_per_move = total_time_left * 0.16f;
     if (time_per_move > max_time_per_move) {
         time_per_move = max_time_per_move;
     }
@@ -410,6 +416,14 @@ int calculate_search_time(int wtime, int btime, int winc, int binc, int movestog
 
     printf("info string TIME_MGMT: calculated=%dms phase=%s algorithm=%s pieces=%d move_est=%d total_time=%.1fs\n",
            final_time, phase_name, algorithm_type, total_pieces, move_number, total_time_left);
+
+    {
+        long long hard_ms = (long long)final_time * 5 / 2;
+        long long cap_ms  = (long long)(my_time * 0.40f);
+        if (hard_ms > cap_ms)      hard_ms = cap_ms;
+        if (hard_ms < final_time) hard_ms = final_time;
+        tm_hard_ms = (int)hard_ms;
+    }
 
     return final_time;
 }
@@ -856,7 +870,12 @@ static void report_pv_lines(Position* pos, int depth, Move first_best,
 
 Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_info) {
 
-    set_search_time_limit(time_limit_ms);
+    const long long tm_soft = (tm_flexible && time_limit_ms > 0) ? time_limit_ms : 0;
+    const int  tm_hard = tm_soft ? (tm_hard_ms > 0 ? tm_hard_ms
+                                                      : (int)(tm_soft * 5 / 2))
+                                   : time_limit_ms;
+    bool tm_move_changed = false;
+    set_search_time_limit(tm_hard);
     start_search_timer();
     new_search_reset();
 
@@ -875,6 +894,15 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
 
         if (depth > 1) {
             long long elapsed_before = time_diff_ms(start_time, get_wall_time());
+            if (tm_soft) {
+
+                bool past_soft = elapsed_before > tm_soft * 0.9;
+                bool may_extend = tm_move_changed
+                                     && elapsed_before < 2 * tm_soft;
+                if (past_soft && !may_extend) {
+                    break;
+                }
+            } else
             if (elapsed_before > time_limit_ms * 0.9) {
                 break;
             }
@@ -904,6 +932,11 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
             }
             break;
         }
+
+        tm_move_changed = valid_move_found
+                          && (current_best.from != best_move.from
+                              || current_best.to != best_move.to
+                              || current_best.promotion != best_move.promotion);
 
         best_move = current_best;
         valid_move_found = true;
@@ -1443,6 +1476,7 @@ int main() {
                 printf("info string TIME_DEBUG: movetime=%dms\n", movetime);
 
                 SearchInfo info = {0};
+                tm_flexible = 0;
                 Move best_move = search_with_time_limit(&pos, movetime, &info);
 
                 emit_bestmove(&best_move, &pos, info.pv);
@@ -1459,6 +1493,7 @@ int main() {
                 int search_time = calculate_search_time(wtime, btime, winc, binc, movestogo, pos.to_move, &pos);
 
                 SearchInfo info = {0};
+                tm_flexible = 1;
                 Move best_move = search_with_time_limit(&pos, search_time, &info);
 
                 emit_bestmove(&best_move, &pos, info.pv);

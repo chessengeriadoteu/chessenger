@@ -4,6 +4,12 @@
 #include "eval.h"
 #include "eval_data.h"
 #include "pawn_structure.h"
+
+#define PAWN_TERMS_WEIGHT 100
+#define KING_SHELTER_WEIGHT 100
+#define BISHOP_PAIR_MG 33
+#define BISHOP_PAIR_EG 57
+
 #include "king_safety.h"
 #include "board.h"
 #include "utils.h"
@@ -667,6 +673,33 @@ static const int mobility_eg[6] = { 0, 4, 4, 5, 4, 0 };
 
 static const int king_zone_weight[6]  = { 0, 3, 2, 2, 5, 0 };
 
+static const int pawn_protected_mg[6] = {  26,   9,   2,   7,  -9, -33 };
+static const int pawn_protected_eg[6] = {  12,   7,  12,  13,  15,  17 };
+
+static const int pawn_threat_mg[6] = {  -4,  11,  24,  13,  10,   4 };
+static const int pawn_threat_eg[6] = {   0,  14,   0,   5,  12,   5 };
+
+static const int attacked_by_pawn_mg[2] = {  71, 175 };
+static const int attacked_by_pawn_eg[2] = {  10,  95 };
+
+static const int protected_passer_mg = 15;
+static const int protected_passer_eg = 16;
+
+static const int blocked_passer_mg[4] = {   6,  -7,  -9,  61 };
+static const int blocked_passer_eg[4] = {  13,  31,  59,  60 };
+
+static const int passer_king_dist_mg[2] = {  -1,  -3 };
+static const int passer_king_dist_eg[2] = {  -4,   8 };
+
+static const int phalanx_mg = 13;
+static const int phalanx_eg = 11;
+
+static const int doubled_mg = 12;
+static const int doubled_eg = 26;
+
+static inline int iabs(int x) { return x < 0 ? -x : x; }
+static inline int imax(int a, int b) { return a > b ? a : b; }
+
 static Bitboard passed_span_mask[2][64];
 static Bitboard file_mask_of_sq[64];
 static bool pawn_masks_ready = false;
@@ -706,6 +739,7 @@ static int eval_tapered(Position* pos) {
     int mg_passed = 0, eg_passed = 0;
     int mg_mob = 0, eg_mob = 0;
     int zone_bb[2] = { 0, 0 };
+    int mg_pawn_terms = 0, eg_pawn_terms = 0;
 
     Bitboard pawn_att[2];
     pawn_att[WHITE] = pawn_set_attacks(pos->pieces[WHITE][PAWN], WHITE);
@@ -721,6 +755,22 @@ static int eval_tapered(Position* pos) {
     for (Color side_c = WHITE; side_c <= BLACK; side_c++) {
         const int sign = (side_c == WHITE) ? 1 : -1;
         const Color enemy_side = (side_c == WHITE) ? BLACK : WHITE;
+        {
+            const Bitboard own_pawns = pos->pieces[side_c][PAWN];
+
+            const int phalanx_cnt = __builtin_popcountll(
+                ((own_pawns >> 1) & ~0x8080808080808080ULL) & own_pawns);
+            mg_pawn_terms += sign * phalanx_cnt * phalanx_mg;
+            eg_pawn_terms += sign * phalanx_cnt * phalanx_eg;
+            int doubled_cnt = 0;
+            for (int file_idx = 0; file_idx < 8; file_idx++) {
+                const int n = __builtin_popcountll(
+                    own_pawns & (0x0101010101010101ULL << file_idx));
+                if (n > 1) doubled_cnt += n - 1;
+            }
+            mg_pawn_terms -= sign * doubled_cnt * doubled_mg;
+            eg_pawn_terms -= sign * doubled_cnt * doubled_eg;
+        }
 
         for (PieceType ptype = PAWN; ptype <= KING; ptype++) {
             Bitboard bb = pos->pieces[side_c][ptype];
@@ -733,14 +783,57 @@ static int eval_tapered(Position* pos) {
 
                 mg_pst += sign * pst_mg_tables[ptype][sq_pst];
                 eg_pst += sign * pst_eg_tables[ptype][sq_pst];
+                {
+                    const Bitboard bit = 1ULL << sq;
+                    if (bit & pawn_att[side_c]) {
+                        mg_pawn_terms += sign * pawn_protected_mg[ptype];
+                        eg_pawn_terms += sign * pawn_protected_eg[ptype];
+                    }
+
+                    if ((passed_span_mask[side_c][sq] & file_mask_of_sq[sq])
+                        & pawn_att[enemy_side]) {
+                        mg_pawn_terms -= sign * pawn_threat_mg[ptype];
+                        eg_pawn_terms -= sign * pawn_threat_eg[ptype];
+                    }
+                    if (ptype != PAWN && (bit & pawn_att[enemy_side])) {
+                        const int i_stm = (side_c == pos->to_move) ? 0 : 1;
+                        mg_pawn_terms -= sign * attacked_by_pawn_mg[i_stm];
+                        eg_pawn_terms -= sign * attacked_by_pawn_eg[i_stm];
+                    }
+                }
 
                 if (ptype == PAWN) {
 
                     if (!(passed_span_mask[side_c][sq] & pos->pieces[enemy_side][PAWN])) {
-                        const int rel_rank = (side_c == WHITE) ? (sq / 8) - 1 : 6 - (sq / 8);
+
+                        const int rel_rank = (side_c == WHITE) ? (sq / 8) : 7 - (sq / 8);
                         const int r = (rel_rank < 0) ? 0 : (rel_rank > 7 ? 7 : rel_rank);
                         mg_passed += sign * passed_bonus_mg[r];
                         eg_passed += sign * passed_bonus_eg[r];
+
+                        if (rel_rank >= 3 && rel_rank <= 6) {
+                            const int idx = rel_rank - 3;
+                            const int advance = rel_rank - 1;
+                            const int front_sq = (side_c == WHITE) ? (sq + 8) : (sq - 8);
+                            if ((1ULL << sq) & pawn_att[side_c]) {
+                                mg_pawn_terms += sign * protected_passer_mg;
+                                eg_pawn_terms += sign * protected_passer_eg;
+                            }
+                            if ((1ULL << front_sq) & pos->occupied[enemy_side]) {
+                                mg_pawn_terms -= sign * blocked_passer_mg[idx];
+                                eg_pawn_terms -= sign * blocked_passer_eg[idx];
+                            }
+                            for (int i_k = 0; i_k < 2; i_k++) {
+                                const Color kk = (i_k == 0) ? side_c : enemy_side;
+                                const Bitboard kbb = pos->pieces[kk][KING];
+                                if (!kbb) continue;
+                                const int ks = get_lsb(kbb);
+                                const int d = imax(iabs(ks / 8 - front_sq / 8),
+                                                      iabs(ks % 8 - front_sq % 8));
+                                mg_pawn_terms += sign * passer_king_dist_mg[i_k] * advance * d;
+                                eg_pawn_terms += sign * passer_king_dist_eg[i_k] * advance * d;
+                            }
+                        }
                     }
                     continue;
                 }
@@ -767,10 +860,27 @@ static int eval_tapered(Position* pos) {
 
     const int king_zone_penalty = (zone_bb[BLACK] - zone_bb[WHITE]) * p256 / 256;
 
+    const int white_king_sq = get_king_square((Position*)pos, WHITE);
+    const int black_king_sq = get_king_square((Position*)pos, BLACK);
+    const int king_shelter_raw =
+        (evaluate_king_shelter((Position*)pos, white_king_sq, WHITE)
+         + evaluate_open_files_near_king((Position*)pos, white_king_sq, WHITE))
+      - (evaluate_king_shelter((Position*)pos, black_king_sq, BLACK)
+         + evaluate_open_files_near_king((Position*)pos, black_king_sq, BLACK));
+    const int king_shelter = king_shelter_raw * KING_SHELTER_WEIGHT * p256 / (100 * 256);
+
+    const int bishop_pair_value = ((BISHOP_PAIR_MG) * p256 + (BISHOP_PAIR_EG) * (256 - p256)) / 256;
+    const int bishop_pair =
+        ((__builtin_popcountll(pos->pieces[WHITE][BISHOP]) >= 2) ? bishop_pair_value : 0)
+      - ((__builtin_popcountll(pos->pieces[BLACK][BISHOP]) >= 2) ? bishop_pair_value : 0);
+
+    const int pawn_terms =
+        ((mg_pawn_terms * p256 + eg_pawn_terms * (256 - p256)) / 256) * PAWN_TERMS_WEIGHT / 100;
+
     const int mg = mg_pst + mg_passed + mg_mob;
     const int eg = eg_pst + eg_passed + eg_mob;
     const int positional = (mg * p256 + eg * (256 - p256)) / 256;
-    const int total = material + positional + king_zone_penalty;
+    const int total = material + positional + king_zone_penalty + king_shelter + bishop_pair + pawn_terms;
 
     if (eval_debug_enabled) {
 
@@ -786,6 +896,7 @@ static int eval_tapered(Position* pos) {
         printf("DEBUG:   Pawns:         %+d\n", pawns_t);
         printf("DEBUG:   Mobility:      %+d\n", mob_t);
         printf("DEBUG:   King Safety:   %+d\n", king_zone_penalty);
+        printf("DEBUG:   PawnTerms:     %+d\n", pawn_terms);
         printf("DEBUG:   TOTAL:         %+d\n", total);
         printf("DEBUG:   Perspective:   %s\n", pos->to_move == WHITE ? "WHITE" : "BLACK");
         printf("DEBUG:   Final:         %+d\n", (pos->to_move == WHITE) ? total : -total);
@@ -906,3 +1017,4 @@ const int* get_king_middlegame_pst(void) {
 const int* get_king_endgame_pst(void) {
     return king_endgame_pst;
 }
+

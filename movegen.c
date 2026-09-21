@@ -220,8 +220,10 @@ static bool is_king_move_adjacent_safe(Position* pos, int to, Color color) {
     return !(king_attacks[enemy_king_square] & (1ULL << to));
 }
 
+static Bitboard g_targets = ~0ULL;
+
 int generate_pawn_moves(Position* pos, Move* moves, int move_count) {
-    if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 30) return move_count;
+    if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 1) return move_count;
 
     Color us = pos->to_move;
     Color them = 1 - us;
@@ -235,7 +237,9 @@ int generate_pawn_moves(Position* pos, Move* moves, int move_count) {
         (pawns << 8) & empty :
         (pawns >> 8) & empty;
 
-    while (single_pushes && move_count < MAX_MOVES - 10) {
+    single_pushes &= g_targets;
+
+    while (single_pushes && move_count < MAX_MOVES - 1) {
         int to = get_lsb(single_pushes);
         int from = to - direction;
 
@@ -264,8 +268,9 @@ int generate_pawn_moves(Position* pos, Move* moves, int move_count) {
         ((starting_pawns << 8) & empty) << 8 :
         ((starting_pawns >> 8) & empty) >> 8;
     double_push_targets &= empty;
+    double_push_targets &= g_targets;
 
-    while (double_push_targets && move_count < MAX_MOVES - 10) {
+    while (double_push_targets && move_count < MAX_MOVES - 1) {
         int to = get_lsb(double_push_targets);
         int from = to - 2 * direction;
 
@@ -279,7 +284,9 @@ int generate_pawn_moves(Position* pos, Move* moves, int move_count) {
         ((pawns & ~file_masks[0]) << 7) & enemies :
         ((pawns & ~file_masks[0]) >> 9) & enemies;
 
-    while (left_attacks && move_count < MAX_MOVES - 10) {
+    left_attacks &= g_targets;
+
+    while (left_attacks && move_count < MAX_MOVES - 1) {
         int to = get_lsb(left_attacks);
         int from = (us == WHITE) ? to - 7 : to + 9;
 
@@ -315,7 +322,9 @@ int generate_pawn_moves(Position* pos, Move* moves, int move_count) {
         ((pawns & ~file_masks[7]) << 9) & enemies :
         ((pawns & ~file_masks[7]) >> 7) & enemies;
 
-    while (right_attacks && move_count < MAX_MOVES - 10) {
+    right_attacks &= g_targets;
+
+    while (right_attacks && move_count < MAX_MOVES - 1) {
         int to = get_lsb(right_attacks);
         int from = (us == WHITE) ? to - 9 : to + 7;
 
@@ -351,15 +360,15 @@ int generate_pawn_moves(Position* pos, Move* moves, int move_count) {
 }
 
 int generate_piece_moves(Position* pos, Move* moves, int move_count) {
-    if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 50) return move_count;
+    if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 1) return move_count;
 
     Color us = pos->to_move;
     Color them = 1 - us;
 
     Bitboard knights = pos->pieces[us][KNIGHT];
-    while (knights && move_count < MAX_MOVES - 20) {
+    while (knights && move_count < MAX_MOVES - 1) {
         int from = get_lsb(knights);
-        Bitboard attacks = knight_attacks[from] & ~pos->occupied[us];
+        Bitboard attacks = knight_attacks[from] & ~pos->occupied[us] & g_targets;
 
         while (attacks && move_count < MAX_MOVES - 1) {
             int to = get_lsb(attacks);
@@ -381,9 +390,9 @@ int generate_piece_moves(Position* pos, Move* moves, int move_count) {
     }
 
     Bitboard bishops = pos->pieces[us][BISHOP];
-    while (bishops && move_count < MAX_MOVES - 20) {
+    while (bishops && move_count < MAX_MOVES - 1) {
         int from = get_lsb(bishops);
-        Bitboard attacks = get_bishop_attacks(from, pos->all_pieces) & ~pos->occupied[us];
+        Bitboard attacks = get_bishop_attacks(from, pos->all_pieces) & ~pos->occupied[us] & g_targets;
 
         while (attacks && move_count < MAX_MOVES - 1) {
             int to = get_lsb(attacks);
@@ -405,9 +414,9 @@ int generate_piece_moves(Position* pos, Move* moves, int move_count) {
     }
 
     Bitboard rooks = pos->pieces[us][ROOK];
-    while (rooks && move_count < MAX_MOVES - 20) {
+    while (rooks && move_count < MAX_MOVES - 1) {
         int from = get_lsb(rooks);
-        Bitboard attacks = get_rook_attacks(from, pos->all_pieces) & ~pos->occupied[us];
+        Bitboard attacks = get_rook_attacks(from, pos->all_pieces) & ~pos->occupied[us] & g_targets;
 
         while (attacks && move_count < MAX_MOVES - 1) {
             int to = get_lsb(attacks);
@@ -429,9 +438,9 @@ int generate_piece_moves(Position* pos, Move* moves, int move_count) {
     }
 
     Bitboard queens = pos->pieces[us][QUEEN];
-    while (queens && move_count < MAX_MOVES - 40) {
+    while (queens && move_count < MAX_MOVES - 1) {
         int from = get_lsb(queens);
-        Bitboard attacks = get_queen_attacks_public(from, pos->all_pieces) & ~pos->occupied[us];
+        Bitboard attacks = get_queen_attacks_public(from, pos->all_pieces) & ~pos->occupied[us] & g_targets;
 
         while (attacks && move_count < MAX_MOVES - 1) {
             int to = get_lsb(attacks);
@@ -456,7 +465,7 @@ int generate_piece_moves(Position* pos, Move* moves, int move_count) {
 }
 
 int generate_king_moves(Position* pos, Move* moves, int move_count) {
-    if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 10) return move_count;
+    if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 1) return move_count;
 
     Color us = pos->to_move;
     Color them = 1 - us;
@@ -465,9 +474,9 @@ int generate_king_moves(Position* pos, Move* moves, int move_count) {
     if (king == 0) return move_count;
 
     int from = get_lsb(king);
-    Bitboard attacks = king_attacks[from] & ~pos->occupied[us];
+    Bitboard attacks = king_attacks[from] & ~pos->occupied[us] & g_targets;
 
-    while (attacks && move_count < MAX_MOVES - 10) {
+    while (attacks && move_count < MAX_MOVES - 1) {
         int to = get_lsb(attacks);
 
         if (!is_king_move_adjacent_safe(pos, to, us)) {
@@ -496,7 +505,7 @@ int generate_king_moves(Position* pos, Move* moves, int move_count) {
 }
 
 int generate_castling_moves(Position* pos, Move* moves, int move_count) {
-    if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 5) return move_count;
+    if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 1) return move_count;
 
     Color us = pos->to_move;
 
@@ -559,7 +568,7 @@ int generate_castling_moves(Position* pos, Move* moves, int move_count) {
 }
 
 int generate_en_passant_moves(Position* pos, Move* moves, int move_count) {
-    if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 5) return move_count;
+    if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 1) return move_count;
 
     if (pos->en_passant_square == -1) return move_count;
 
@@ -606,7 +615,7 @@ int generate_en_passant_moves(Position* pos, Move* moves, int move_count) {
         }
     }
 
-    while (attacking_pawns && move_count < MAX_MOVES - 5) {
+    while (attacking_pawns && move_count < MAX_MOVES - 1) {
         int from = get_lsb(attacking_pawns);
         if (move_count < MAX_MOVES - 1) {
             moves[move_count++] = (Move){from, ep_square, PAWN, PAWN, EMPTY, false, true, 0};
@@ -738,15 +747,13 @@ static bool is_legal_fast(Position* pos, Move* mv, const LegalityContext* k) {
     return true;
 }
 
-bool has_legal_move(Position* pos) {
-    Move move_list[256];
-    int n = generate_moves(pos, move_list);
-    LegalityContext legal_ctx;
-    legality_context_init(pos, &legal_ctx);
-    for (int i = 0; i < n; i++) {
-        if (is_legal_fast(pos, &move_list[i], &legal_ctx)) return true;
-    }
-    return false;
+typedef char legality_buf_size_check[(sizeof(LegalityContext) <= LEGALITY_BUF_BYTES) ? 1 : -1];
+void legality_context_init_pub(Position* pos, LegalityBuffer* buf_area) {
+    (void)sizeof(legality_buf_size_check);
+    legality_context_init(pos, (LegalityContext*)buf_area);
+}
+bool is_legal_fast_pub(Position* pos, Move* mv, const LegalityBuffer* buf_area) {
+    return is_legal_fast(pos, mv, (const LegalityContext*)buf_area);
 }
 
 int generate_moves(Position* pos, Move* moves) {
@@ -890,14 +897,20 @@ int generate_legal_evasions(Position* pos, Move* moves) {
     return legal_count;
 }
 
-int generate_noisy_moves(Position* pos, Move* moves) {
-    if (!pos || !moves) return 0;
-
+static int generate_noisy_internal(Position* pos, Move* moves) {
     Move buf_area[MAX_MOVES];
     int total_moves = 0;
+    const Color    us   = pos->to_move;
+    const Bitboard opp_color  = pos->occupied[1 - us];
+
+    const Bitboard prom = (us == WHITE) ? rank_masks[7] : rank_masks[0];
+    g_targets = opp_color | prom;
     total_moves = generate_pawn_moves(pos, buf_area, total_moves);
+    g_targets = opp_color;
     total_moves = generate_piece_moves(pos, buf_area, total_moves);
     total_moves = generate_king_moves(pos, buf_area, total_moves);
+    g_targets = ~0ULL;
+
     total_moves = generate_en_passant_moves(pos, buf_area, total_moves);
 
     int n = 0;
@@ -907,6 +920,11 @@ int generate_noisy_moves(Position* pos, Move* moves) {
         }
     }
     return n;
+}
+
+int generate_noisy_moves(Position* pos, Move* moves) {
+    if (!pos || !moves) return 0;
+    return generate_noisy_internal(pos, moves);
 }
 
 int generate_legal_noisy(Position* pos, Move* moves) {

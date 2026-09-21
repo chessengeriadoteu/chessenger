@@ -1,11 +1,11 @@
-# Chessenger 0.8
+# Chessenger 0.9
 
 Chessenger is a UCI chess engine in C99, written by AI coding assistants under the direction of Dariusz Domagała
 (see [How Chessenger is made](#how-chessenger-is-made)).
 
-- Version: 0.8 (code date 2026-09-12)
-- Strength: 2872.78 [2852.48, 2894.25] (run A119: 1000 games against Berserk 2.0.0, MCERL 2700)
-- What is new: New search adapted from OliThink 5.10.5; versions 0.6 and 0.7 were skipped on purpose.
+- Version: 0.9 (code date 2026-09-21)
+- Strength: 2932.38 [2919.52, 2945.24] (run A143: 2000 games, Ordo anchored to MCERL ratings; earlier run A142: 2921.39)
+- What is new: Evaluation weights partly based on 4ku 5.1; tuned search and time management.
 
 ## How Chessenger is made
 
@@ -40,7 +40,7 @@ which the author maintains. Chessenger played with one thread. A rating is the o
 Elo difference measured in the games, and it belongs to the measured binary. MCERL ratings are not directly
 comparable with other rating lists such as CCRL or CEGT.
 
-1000 games against Berserk 2.0.0 (MCERL 2700) at 2 s + 0.2 s per move, Hash 128 MB, on a Mac mini M4 Pro: +172.78 Elo, so 2700 + 172.78 = 2872.78.
+2000 games, 400 against each of five engines from MCERL (Counter, Crafty, Fruit Reloaded, Igel, OliThink), at 2 s + 0.2 s per move, Hash 128 MB, on a Mac mini M4 Pro, rated with Ordo anchored to their MCERL ratings. An earlier run of 1000 games against the same five engines on a MacBook Pro M1 Pro gave 2921.39 [2902.23, 2940.47].
 
 ## About the source
 
@@ -62,15 +62,15 @@ make release    # all binaries into dist/ (Linux and Windows need zig)
 
 | File | For |
 |---|---|
-| `chessenger-0.8-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
-| `chessenger-0.8-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
-| `chessenger-0.8-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
-| `chessenger-0.8-linux-arm64.tar.gz` | Linux, ARM64 (static) |
-| `chessenger-0.8-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
-| `chessenger-0.8-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
-| `chessenger-0.8-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
-| `chessenger-0.8-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
-| `chessenger-0.8-windows-arm64.zip` | Windows on ARM (ARM64) |
+| `chessenger-0.9-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
+| `chessenger-0.9-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
+| `chessenger-0.9-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
+| `chessenger-0.9-linux-arm64.tar.gz` | Linux, ARM64 (static) |
+| `chessenger-0.9-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
+| `chessenger-0.9-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
+| `chessenger-0.9-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
+| `chessenger-0.9-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
+| `chessenger-0.9-windows-arm64.zip` | Windows on ARM (ARM64) |
 
 Each archive holds the binary, `LICENSE`, `README.md` and, where the version has one, `LICENSES/`.
 
@@ -79,7 +79,7 @@ If unsure on Windows, take `avx2`; on Windows on ARM, take `arm64`.
 ## UCI
 
 Use Chessenger with a UCI chess GUI or from the command line.
-The engine reports itself as `id name Chessenger 0.8`.
+The engine reports itself as `id name Chessenger 0.9`.
 
 ### Commands
 
@@ -121,6 +121,7 @@ Commands outside the UCI protocol, for testing:
 
 - Oliver Brausch, for OliThink 5.10.5, which our search is adapted from (MIT license, see `LICENSES/OLITHINK-MIT.txt`).
 - Ronald Friederich, for PeSTO's piece-square tables.
+- kz04px, for 4ku, which some of our evaluation weights are based on.
 - Tomasz Michniewski, for the Simplified Evaluation Function on the Chess Programming Wiki, whose piece-square tables our `eval_data.h` is based on.
 - The Chess Programming Wiki and its authors.
 
@@ -128,6 +129,7 @@ Commands outside the UCI protocol, for testing:
 
 GPL-3.0-or-later, see `LICENSE`.
 Code adapted from OliThink 5.10.5 is also under its MIT license, see `LICENSES/OLITHINK-MIT.txt`.
+Evaluation weights based on 4ku 5.1 are under its MIT license, see `LICENSES/4KU-MIT.txt`.
 
 Chessenger is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
 License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any

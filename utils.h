@@ -57,6 +57,7 @@ char* square_to_string(int square);
 bool validate_move_before_send(Position* pos, Move* move);
 
 int static_exchange_evaluation(Position* pos, Move* move);
+
 bool see_is_good_capture(Position* pos, Move* move);
 
 void trim_uci_line(char* line);

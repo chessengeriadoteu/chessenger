@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND MIT
  * Copyright (C) Dariusz Domagała
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
- * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-09-12.
+ * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-09-21.
  */
 #include "search.h"
 #include "board.h"
@@ -29,6 +29,7 @@ static const int null_reduction_steps[7] = { 13, 43, 149, 519, 1809, 6311, 22027
 
 static int  quiet_history[65536];
 static Move killer_table[MAX_SEARCH_PLY];
+
 static Move pv_triangle[MAX_SEARCH_PLY + 1][MAX_SEARCH_PLY + 1];
 static int  eval_stack_ply[MAX_SEARCH_PLY + 1];
 static int  null_at_ply[MAX_SEARCH_PLY + 2];
@@ -47,6 +48,8 @@ static bool is_no_move(Move m) {
 static bool same_move(Move a, Move b) {
     return a.from == b.from && a.to == b.to && a.promotion == b.promotion;
 }
+
+#define IS_KILLER_OR_COUNTER(m, ply) (same_move((m), killer_table[(ply)]))
 
 static int history_index(Color c, Move m) {
     return ((int)c << 15) | ((int)m.piece << 12) | (m.from << 6) | m.to;
@@ -105,7 +108,10 @@ static Move pick_quiet(Move* mlist, int n, int s, int ply, Color us) {
     Move m;
     for (i = s; i < n; i++) {
         m = mlist[i];
-        if (same_move(m, killer_table[ply])) { pi = i; break; }
+        if (same_move(m, killer_table[ply])) {
+            pi = i;
+            break;
+        }
         if (vmax < quiet_history[history_index(us, m)]) { vmax = quiet_history[history_index(us, m)]; pi = i; }
     }
     m = mlist[pi];
@@ -119,6 +125,8 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
 static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchInfo* info) {
     int  i, n, best = -MATE_SCORE;
     Move mlist[MAX_MOVES];
+
+    LegalityBuffer qs_legal_ctx; int qs_legal_ready = 0;
 
     if (info->seldepth < ply) info->seldepth = ply;
     if (fast_check_stop()) return alpha;
@@ -138,7 +146,7 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
         }
     } while (0);
 
-    n = ch ? generate_legal_evasions(pos, mlist) : generate_legal_noisy(pos, mlist);
+    n = ch ? generate_legal_evasions(pos, mlist) : generate_noisy_moves(pos, mlist);
     if (ch && n == 0) return -MATE_SCORE + ply;
 
     for (i = 0; i < n; i++) {
@@ -150,6 +158,10 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
                 && piece_value_cp[m.piece] > piece_value_cp[m.captured]
                 && static_exchange_evaluation(pos, &m) < 0) continue;
 
+        if (!ch) {
+            if (!qs_legal_ready) { legality_context_init_pub(pos, &qs_legal_ctx); qs_legal_ready = 1; }
+            if (!is_legal_fast_pub(pos, &m, &qs_legal_ctx)) continue;
+        }
         make_move_full(pos, &m, &u);
         info->nodes++;
         (*node_counter_ptr)++;
@@ -212,7 +224,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
 
     tt_hit = probe_hash_entry(&main_tt, pos->hash, &tt_d, &tt_flag, &tt_s, ply);
     if (tt_hit && !excl && tt_d >= d) {
-        if ((tt_flag == HASH_BETA  || tt_flag == HASH_EXACT) && tt_s >= beta)  return beta;
+        if ((tt_flag == HASH_BETA  || tt_flag == HASH_EXACT) && tt_s >= beta) return beta;
         if ((tt_flag == HASH_ALPHA || tt_flag == HASH_EXACT) && tt_s <= alpha) return alpha;
     }
     if (!excl && is_no_move(tt_pv_move)) {
@@ -262,6 +274,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
 
     if (d >= 4 && is_no_move(tt_pv_move)) d--;
 
+    LegalityBuffer legal_buf;
     improving_flag = !ch && ply >= 2 && eval_adj >= eval_stack_ply[ply - 2];
     first   = NO_MOVE_YET;
     hist_max  = -1;
@@ -271,7 +284,9 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
         nall   = generate_legal_evasions(pos, mlist);
         nnoisy = nall;
     } else {
-        nall   = generate_legal_moves(pos, mlist);
+
+        nall   = generate_moves(pos, mlist);
+        legality_context_init_pub(pos, &legal_buf);
         nnoisy = 0;
         for (i = 0; i < nall; i++) {
             if (mlist[i].captured != EMPTY || mlist[i].promotion != EMPTY) {
@@ -322,11 +337,14 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
 
             if ((n != STAGE_HASH && same_move(m, tt_pv_move)) || (excl && same_move(m, *excl))) continue;
 
+            if (!ch && !is_legal_fast_pub(pos, &m, &legal_buf)) continue;
+
             quiet = (m.captured == EMPTY && m.promotion == EMPTY);
 
             if (ply == 0 && (is_root_excluded(&m) || !is_root_included(&m))) continue;
 
-            if (!ch && quiet && alpha > -MATE_SCORE + 500 && n_quiets > 2 * d * (improving_flag + 1)) {
+            if (!ch && quiet && alpha > -MATE_SCORE + 500 && n_quiets > (2 * d * (improving_flag + 1))
+               ) {
                 n = STAGE_END;
                 break;
             }
@@ -344,7 +362,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
 
             } else if (n == STAGE_CAPTURES && d >= 2 && see < 0) {
                 ext -= (d + 1) / (3 + improving_flag);
-            } else if (n == STAGE_QUIETS && !same_move(m, killer_table[ply])) {
+            } else if (n == STAGE_QUIETS && !IS_KILLER_OR_COUNTER(m, ply)) {
                 int his = quiet_history[history_index(us, m)];
                 if (his > hist_max) hist_max = his;
                 else if (d < 6 && (his < 0 || his * his < hist_max)) {

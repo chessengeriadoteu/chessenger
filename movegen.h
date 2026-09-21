@@ -35,10 +35,13 @@ int generate_en_passant_moves(Position* pos, Move* moves, int move_count);
 int generate_moves(Position* pos, Move* moves);
 int generate_legal_moves(Position* pos, Move* moves);
 
-bool has_legal_move(Position* pos);
-
 int generate_noisy_moves(Position* pos, Move* moves);
 int generate_legal_noisy(Position* pos, Move* moves);
+
+#define LEGALITY_BUF_BYTES 256
+typedef union { unsigned char b[LEGALITY_BUF_BYTES]; unsigned long long align; } LegalityBuffer;
+void legality_context_init_pub(Position* pos, LegalityBuffer* buf_area);
+bool is_legal_fast_pub(Position* pos, Move* mv, const LegalityBuffer* buf_area);
 
 int generate_check_evasions(Position* pos, Move* moves);
 int generate_legal_evasions(Position* pos, Move* moves);

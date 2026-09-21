@@ -46,4 +46,4 @@ extern Bitboard king_attacks[64];
 const int* get_king_middlegame_pst(void);
 const int* get_king_endgame_pst(void);
 
-#endif 
+#endif
