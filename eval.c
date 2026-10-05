@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) Dariusz Domagała
+ * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
+ * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-05.
  */
 #include "eval.h"
 #include "eval_data.h"
@@ -671,7 +673,28 @@ static const int passed_bonus_eg[8] = { 0, 10, 20, 35,  60, 100, 160, 0 };
 static const int mobility_mg[6] = { 0, 3, 4, 4, 2, 0 };
 static const int mobility_eg[6] = { 0, 4, 4, 5, 4, 0 };
 
-static const int king_zone_weight[6]  = { 0, 3, 2, 2, 5, 0 };
+static const int ks_piece_weight_mg[6] = { 0, 36, 47, 33, 11, 0 };
+static const int ks_piece_weight_eg[6] = { 0, -43, 37, 65,  3, 0 };
+#define KS_ZONE_ATTACK_MG      8
+#define KS_ZONE_ATTACK_EG     22
+#define KS_WEAK_SQ_MG    27
+#define KS_WEAK_SQ_EG   (-55)
+#define KS_CHECK_N_MG  77
+#define KS_CHECK_N_EG  18
+#define KS_CHECK_B_MG  38
+#define KS_CHECK_B_EG  74
+#define KS_CHECK_R_MG  92
+#define KS_CHECK_R_EG  91
+#define KS_CHECK_Q_MG  48
+#define KS_CHECK_Q_EG 125
+#define KS_UNSAFE_MG  18
+#define KS_UNSAFE_EG  85
+#define KS_NO_QUEEN_MG (-86)
+#define KS_NO_QUEEN_EG (-29)
+#define KS_OFFSET_MG   30
+#define KS_OFFSET_EG   40
+#define KS_PAWN_NORM_MG    103
+#define KS_PAWN_NORM_EG    211
 
 static const int pawn_protected_mg[6] = {  26,   9,   2,   7,  -9, -33 };
 static const int pawn_protected_eg[6] = {  12,   7,  12,  13,  15,  17 };
@@ -699,6 +722,11 @@ static const int doubled_eg = 26;
 
 static inline int iabs(int x) { return x < 0 ? -x : x; }
 static inline int imax(int a, int b) { return a > b ? a : b; }
+
+static const int v2l_mg[2][6] = { { 0, 21,  2,  -7,   3, 0 },
+                                  { 0, 53, -4, -11, -17, 0 } };
+static const int v2l_eg[2][6] = { { 0, 11,   2, 14, 12, 0 },
+                                  { 0, -1, -10, -1, 24, 0 } };
 
 static Bitboard passed_span_mask[2][64];
 static Bitboard file_mask_of_sq[64];
@@ -728,36 +756,33 @@ static inline Bitboard pawn_set_attacks(Bitboard pawns_bb, Color side_c) {
                             : ((not_h_file >> 7) | (not_a_file >> 9));
 }
 
-static int eval_tapered(Position* pos) {
-    if (!pawn_masks_ready) build_pawn_masks();
+#define PAWN_HASH_BITS 14
+typedef struct {
+    Bitboard wp, bp;
+    Bitboard cand;
+    int32_t mg_pst, eg_pst, mg_passed, eg_passed, mg_pawn_terms, eg_pawn_terms, shelter;
+    int8_t kb, kc;
+    uint8_t open_near1[2], open_near2[2];
+} PawnHashEntry;
+static PawnHashEntry pawn_hash[1u << PAWN_HASH_BITS];
+static int pawn_hash_ready = 0;
 
-    const int p256 = game_phase_256(pos);
-    const Bitboard occ_all = pos->all_pieces;
+static inline uint32_t pawn_hash_index(Bitboard wp, Bitboard bp, int kb, int kc) {
+    uint64_t h = wp ^ (bp * 0x9E3779B97F4A7C15ULL)
+               ^ ((uint64_t)((kb + 1) * 65 + (kc + 1)) * 0xBF58476D1CE4E5B9ULL);
+    h ^= h >> 31;
+    h *= 0x94D049BB133111EBULL;
+    return (uint32_t)(h >> (64 - PAWN_HASH_BITS));
+}
 
-    int material = 0;
-    int mg_pst = 0, eg_pst = 0;
-    int mg_passed = 0, eg_passed = 0;
-    int mg_mob = 0, eg_mob = 0;
-    int zone_bb[2] = { 0, 0 };
-    int mg_pawn_terms = 0, eg_pawn_terms = 0;
-
-    Bitboard pawn_att[2];
-    pawn_att[WHITE] = pawn_set_attacks(pos->pieces[WHITE][PAWN], WHITE);
-    pawn_att[BLACK] = pawn_set_attacks(pos->pieces[BLACK][PAWN], BLACK);
-
-    Bitboard king_zone[2];
-    for (Color k = WHITE; k <= BLACK; k++) {
-        const Bitboard king_bb1 = pos->pieces[k][KING];
-        const int king_sq_v = king_bb1 ? get_lsb(king_bb1) : -1;
-        king_zone[k] = (king_sq_v >= 0) ? (king_attacks[king_sq_v] | king_bb1) : 0ULL;
-    }
-
+static void pawn_hash_compute(Position* pos, const Bitboard pawn_att[2], PawnHashEntry* w) {
+    int mg_pst = 0, eg_pst = 0, mg_passed = 0, eg_passed = 0, mg_pawn_terms = 0, eg_pawn_terms = 0;
+    Bitboard cand = 0;
     for (Color side_c = WHITE; side_c <= BLACK; side_c++) {
         const int sign = (side_c == WHITE) ? 1 : -1;
         const Color enemy_side = (side_c == WHITE) ? BLACK : WHITE;
+        const Bitboard own_pawns = pos->pieces[side_c][PAWN];
         {
-            const Bitboard own_pawns = pos->pieces[side_c][PAWN];
-
             const int phalanx_cnt = __builtin_popcountll(
                 ((own_pawns >> 1) & ~0x8080808080808080ULL) & own_pawns);
             mg_pawn_terms += sign * phalanx_cnt * phalanx_mg;
@@ -771,10 +796,155 @@ static int eval_tapered(Position* pos) {
             mg_pawn_terms -= sign * doubled_cnt * doubled_mg;
             eg_pawn_terms -= sign * doubled_cnt * doubled_eg;
         }
+        Bitboard bb = own_pawns;
+        while (bb) {
+            const int sq = get_lsb(bb);
+            pop_lsb(&bb);
+            const int sq_pst = (side_c == WHITE) ? (sq ^ 56) : sq;
+            mg_pst += sign * pst_mg_tables[PAWN][sq_pst];
+            eg_pst += sign * pst_eg_tables[PAWN][sq_pst];
+            {
+                const Bitboard bit = 1ULL << sq;
+                if (bit & pawn_att[side_c]) {
+                    mg_pawn_terms += sign * pawn_protected_mg[PAWN];
+                    eg_pawn_terms += sign * pawn_protected_eg[PAWN];
+                }
+                if ((passed_span_mask[side_c][sq] & file_mask_of_sq[sq])
+                    & pawn_att[enemy_side]) {
+                    mg_pawn_terms -= sign * pawn_threat_mg[PAWN];
+                    eg_pawn_terms -= sign * pawn_threat_eg[PAWN];
+                }
+            }
+            if (!(passed_span_mask[side_c][sq] & pos->pieces[enemy_side][PAWN])) {
+                const int rel_rank = (side_c == WHITE) ? (sq / 8) : 7 - (sq / 8);
+                const int r = (rel_rank < 0) ? 0 : (rel_rank > 7 ? 7 : rel_rank);
+                mg_passed += sign * passed_bonus_mg[r];
+                eg_passed += sign * passed_bonus_eg[r];
+                if (rel_rank >= 3 && rel_rank <= 6) {
+                    const int advance = rel_rank - 1;
+                    const int front_sq = (side_c == WHITE) ? (sq + 8) : (sq - 8);
+                    cand |= 1ULL << sq;
+                    if ((1ULL << sq) & pawn_att[side_c]) {
+                        mg_pawn_terms += sign * protected_passer_mg;
+                        eg_pawn_terms += sign * protected_passer_eg;
+                    }
+                    for (int i_k = 0; i_k < 2; i_k++) {
+                        const Color kk = (i_k == 0) ? side_c : enemy_side;
+                        const Bitboard kbb = pos->pieces[kk][KING];
+                        if (!kbb) continue;
+                        const int ks = get_lsb(kbb);
+                        const int d = imax(iabs(ks / 8 - front_sq / 8),
+                                              iabs(ks % 8 - front_sq % 8));
+                        mg_pawn_terms += sign * passer_king_dist_mg[i_k] * advance * d;
+                        eg_pawn_terms += sign * passer_king_dist_eg[i_k] * advance * d;
+                    }
+                }
+            }
+        }
+    }
+    w->mg_pst = mg_pst; w->eg_pst = eg_pst;
+    w->mg_passed = mg_passed; w->eg_passed = eg_passed;
+    w->mg_pawn_terms = mg_pawn_terms; w->eg_pawn_terms = eg_pawn_terms;
+    w->cand = cand;
+
+    const int kr[2] = { w->kb, w->kc };
+    w->shelter = evaluate_king_shelter(pos, kr[WHITE], WHITE)
+              - evaluate_king_shelter(pos, kr[BLACK], BLACK);
+    const Bitboard pawns_bb = pos->pieces[WHITE][PAWN] | pos->pieces[BLACK][PAWN];
+    for (int k = 0; k < 2; k++) {
+        w->open_near1[k] = 0; w->open_near2[k] = 0;
+        if (kr[k] < 0) continue;
+        const int kfile = kr[k] & 7;
+        for (int df = -2; df <= 2; df++) {
+            const int f = kfile + df;
+            if (f < 0 || f >= 8) continue;
+            if (pawns_bb & (0x0101010101010101ULL << f)) continue;
+            if (df >= -1 && df <= 1) w->open_near1[k] |= (uint8_t)(1u << f);
+            else                     w->open_near2[k] |= (uint8_t)(1u << f);
+        }
+    }
+}
+
+static const PawnHashEntry* pawn_hash_probe(Position* pos, const Bitboard pawn_att[2]) {
+    if (!pawn_hash_ready) {
+        for (uint32_t i = 0; i < (1u << PAWN_HASH_BITS); i++) pawn_hash[i].kb = 127;
+        pawn_hash_ready = 1;
+    }
+    const Bitboard wp = pos->pieces[WHITE][PAWN], bp = pos->pieces[BLACK][PAWN];
+    const int kb = get_king_square(pos, WHITE), kc = get_king_square(pos, BLACK);
+    PawnHashEntry* w = &pawn_hash[pawn_hash_index(wp, bp, kb, kc)];
+    if (w->wp == wp && w->bp == bp && w->kb == kb && w->kc == kc) return w;
+    w->wp = wp; w->bp = bp; w->kb = (int8_t)kb; w->kc = (int8_t)kc;
+    pawn_hash_compute(pos, pawn_att, w);
+    return w;
+}
+
+static inline unsigned file_occupancy_byte(Bitboard b) {
+    b |= b >> 32; b |= b >> 16; b |= b >> 8;
+    return (unsigned)(b & 0xFF);
+}
+
+static int eval_tapered(Position* pos) {
+    if (!pawn_masks_ready) build_pawn_masks();
+
+    const int p256 = game_phase_256(pos);
+    const Bitboard occ_all = pos->all_pieces;
+
+    int material = 0;
+    int mg_pst = 0, eg_pst = 0;
+    int mg_passed = 0, eg_passed = 0;
+    int mg_mob = 0, eg_mob = 0;
+    int mg_pawn_terms = 0, eg_pawn_terms = 0;
+    int mg_linie = 0, eg_linie = 0;
+
+    Bitboard pawn_att[2];
+    pawn_att[WHITE] = pawn_set_attacks(pos->pieces[WHITE][PAWN], WHITE);
+    pawn_att[BLACK] = pawn_set_attacks(pos->pieces[BLACK][PAWN], BLACK);
+    const PawnHashEntry* const ph = pawn_hash_probe(pos, pawn_att);
+    mg_pst += ph->mg_pst;     eg_pst += ph->eg_pst;
+    mg_passed += ph->mg_passed; eg_passed += ph->eg_passed;
+    mg_pawn_terms += ph->mg_pawn_terms; eg_pawn_terms += ph->eg_pawn_terms;
+    for (Bitboard b = ph->cand; b; ) {
+        const int sq = get_lsb(b);
+        pop_lsb(&b);
+        const Color side_c = (pos->pieces[WHITE][PAWN] & (1ULL << sq)) ? WHITE : BLACK;
+        const int sign = (side_c == WHITE) ? 1 : -1;
+        const Color enemy_side = (side_c == WHITE) ? BLACK : WHITE;
+        const int rel_rank = (side_c == WHITE) ? (sq / 8) : 7 - (sq / 8);
+        const int idx = rel_rank - 3;
+        const int front_sq = (side_c == WHITE) ? (sq + 8) : (sq - 8);
+        if ((1ULL << front_sq) & pos->occupied[enemy_side]) {
+            mg_pawn_terms -= sign * blocked_passer_mg[idx];
+            eg_pawn_terms -= sign * blocked_passer_eg[idx];
+        }
+    }
+
+    Bitboard ks_att_all[2], ks_att_twice[2], ks_att_by_type[2][6], ks_zone_bb[2];
+    int ks_attackers[2] = { 0, 0 }, ks_zone_attacks[2] = { 0, 0 };
+    int ks_weight_sum_mg[2] = { 0, 0 }, ks_weight_sum_eg[2] = { 0, 0 };
+    for (Color k = WHITE; k <= BLACK; k++) {
+        const Bitboard king_bb1 = pos->pieces[k][KING];
+        const Bitboard around = king_bb1 ? king_attacks[get_lsb(king_bb1)] : 0ULL;
+        const Bitboard pawns_bb = pos->pieces[k][PAWN];
+        const Bitboard pp2 = (k == WHITE)
+            ? (((pawns_bb & ~0x0101010101010101ULL) << 7) & ((pawns_bb & ~0x8080808080808080ULL) << 9))
+            : (((pawns_bb & ~0x8080808080808080ULL) >> 7) & ((pawns_bb & ~0x0101010101010101ULL) >> 9));
+        for (int t = 0; t < 6; t++) ks_att_by_type[k][t] = 0ULL;
+        ks_att_by_type[k][KING] = around;
+        ks_att_by_type[k][PAWN] = pawn_att[k];
+        ks_att_twice[k] = (around & pawn_att[k]) | pp2;
+        ks_att_all[k] = around | pawn_att[k];
+        ks_zone_bb[k] = (around | ((k == WHITE) ? (around << 8) : (around >> 8))) & ~pawn_att[k];
+    }
+
+    for (Color side_c = WHITE; side_c <= BLACK; side_c++) {
+        const int sign = (side_c == WHITE) ? 1 : -1;
+        const Color enemy_side = (side_c == WHITE) ? BLACK : WHITE;
 
         for (PieceType ptype = PAWN; ptype <= KING; ptype++) {
             Bitboard bb = pos->pieces[side_c][ptype];
             material += sign * __builtin_popcountll(bb) * eval_piece_value[ptype];
+            if (ptype == PAWN) continue;
 
             while (bb) {
                 const int sq = get_lsb(bb);
@@ -839,6 +1009,13 @@ static int eval_tapered(Position* pos) {
                 }
                 if (ptype == KING) continue;
 
+                if (ptype == ROOK
+                    && !(file_mask_of_sq[sq] & pos->pieces[side_c][PAWN])) {
+                    const int open_file = !(file_mask_of_sq[sq] & pos->pieces[enemy_side][PAWN]);
+                    mg_linie += sign * v2l_mg[open_file][ptype];
+                    eg_linie += sign * v2l_eg[open_file][ptype];
+                }
+
                 Bitboard att_bb;
                 switch (ptype) {
                     case KNIGHT: att_bb = knight_attacks[sq];                     break;
@@ -852,21 +1029,89 @@ static int eval_tapered(Position* pos) {
                 mg_mob += sign * n * mobility_mg[ptype];
                 eg_mob += sign * n * mobility_eg[ptype];
 
-                const int zone_hits = __builtin_popcountll(att_bb & king_zone[enemy_side]);
-                if (zone_hits) zone_bb[enemy_side] += zone_hits * king_zone_weight[ptype];
+                {
+
+                    Bitboard b;
+                    switch (ptype) {
+                        case BISHOP:
+                            b = get_bishop_attacks_public(sq, occ_all ^ pos->pieces[side_c][QUEEN]);
+                            break;
+                        case ROOK:
+                            b = get_rook_attacks_public(sq,
+                                occ_all ^ (pos->pieces[side_c][ROOK] | pos->pieces[side_c][QUEEN]));
+                            break;
+                        case QUEEN:
+                            b = get_bishop_attacks_public(sq, occ_all ^ pos->pieces[side_c][BISHOP])
+                              | get_rook_attacks_public(sq, occ_all ^ pos->pieces[side_c][ROOK]);
+                            break;
+                        default:
+                            b = att_bb;
+                            break;
+                    }
+                    ks_att_by_type[side_c][ptype] |= b;
+                    ks_att_twice[side_c] |= ks_att_all[side_c] & b;
+                    ks_att_all[side_c] |= b;
+                    const Bitboard in_king_zone = b & ks_zone_bb[enemy_side];
+                    if (in_king_zone) {
+                        ks_attackers[side_c] += 1;
+                        ks_zone_attacks[side_c] += __builtin_popcountll(in_king_zone);
+                        ks_weight_sum_mg[side_c] += ks_piece_weight_mg[ptype];
+                        ks_weight_sum_eg[side_c] += ks_piece_weight_eg[ptype];
+                    }
+                }
             }
         }
     }
 
-    const int king_zone_penalty = (zone_bb[BLACK] - zone_bb[WHITE]) * p256 / 256;
+#define THREATS_TERM
 
-    const int white_king_sq = get_king_square((Position*)pos, WHITE);
-    const int black_king_sq = get_king_square((Position*)pos, BLACK);
-    const int king_shelter_raw =
-        (evaluate_king_shelter((Position*)pos, white_king_sq, WHITE)
-         + evaluate_open_files_near_king((Position*)pos, white_king_sq, WHITE))
-      - (evaluate_king_shelter((Position*)pos, black_king_sq, BLACK)
-         + evaluate_open_files_near_king((Position*)pos, black_king_sq, BLACK));
+    int ks_mg[2] = { 0, 0 }, ks_eg[2] = { 0, 0 };
+    for (Color us = WHITE; us <= BLACK; us++) {
+        const Color them = (us == WHITE) ? BLACK : WHITE;
+        const int no_queen = !pos->pieces[us][QUEEN];
+        if (ks_attackers[us] < 1 + no_queen || !pos->pieces[them][KING]) continue;
+        const int target_king_sq = get_lsb(pos->pieces[them][KING]);
+
+        const Bitboard weak_sq = ks_att_all[us] & ~ks_att_twice[them]
+                             & (~ks_att_all[them] | ks_att_by_type[them][KING]);
+        const Bitboard safe_sq = ~pos->occupied[us]
+                                  & (~ks_att_all[them] | (weak_sq & ks_att_twice[us]));
+        const Bitboard rook_rays = get_rook_attacks_public(target_king_sq, occ_all);
+        const Bitboard bishop_rays = get_bishop_attacks_public(target_king_sq, occ_all);
+        const Bitboard chk_knight = ks_att_by_type[us][KNIGHT] & knight_attacks[target_king_sq];
+        const Bitboard chk_bishop = ks_att_by_type[us][BISHOP] & bishop_rays;
+        const Bitboard chk_rook = ks_att_by_type[us][ROOK] & rook_rays;
+        const Bitboard chk_queen = ks_att_by_type[us][QUEEN] & (bishop_rays | rook_rays);
+        const Bitboard chk_all = chk_knight | chk_bishop | chk_rook | chk_queen;
+        const int n_weak_sq = __builtin_popcountll(weak_sq & ks_zone_bb[them]);
+        const int n_sn = __builtin_popcountll(chk_knight & safe_sq);
+        const int n_sb = __builtin_popcountll(chk_bishop & safe_sq);
+        const int n_sr = __builtin_popcountll(chk_rook & safe_sq);
+        const int n_sq = __builtin_popcountll(chk_queen & safe_sq);
+        const int n_nb = __builtin_popcountll(chk_all & ~safe_sq);
+
+        const int b_mg = ks_weight_sum_mg[us] + KS_OFFSET_MG + KS_ZONE_ATTACK_MG * ks_zone_attacks[us]
+                       + KS_WEAK_SQ_MG * n_weak_sq + KS_NO_QUEEN_MG * no_queen
+                       + KS_CHECK_N_MG * n_sn + KS_CHECK_B_MG * n_sb + KS_CHECK_R_MG * n_sr
+                       + KS_CHECK_Q_MG * n_sq + KS_UNSAFE_MG * n_nb;
+        const int b_eg = ks_weight_sum_eg[us] + KS_OFFSET_EG + KS_ZONE_ATTACK_EG * ks_zone_attacks[us]
+                       + KS_WEAK_SQ_EG * n_weak_sq + KS_NO_QUEEN_EG * no_queen
+                       + KS_CHECK_N_EG * n_sn + KS_CHECK_B_EG * n_sb + KS_CHECK_R_EG * n_sr
+                       + KS_CHECK_Q_EG * n_sq + KS_UNSAFE_EG * n_nb;
+
+        ks_mg[us] = ((b_mg > 0 ? b_mg : 0) * b_mg / 256) * PAWN_VALUE / KS_PAWN_NORM_MG;
+        ks_eg[us] = ((b_eg > 0 ? b_eg : 0) / 16) * PAWN_VALUE / KS_PAWN_NORM_EG;
+    }
+    const int king_zone_penalty = ((ks_mg[WHITE] - ks_mg[BLACK]) * p256
+                          + (ks_eg[WHITE] - ks_eg[BLACK]) * (256 - p256)) / 256;
+
+    const unsigned rq_b = file_occupancy_byte(pos->pieces[BLACK][ROOK] | pos->pieces[BLACK][QUEEN]);
+    const unsigned rq_c = file_occupancy_byte(pos->pieces[WHITE][ROOK] | pos->pieces[WHITE][QUEEN]);
+    const int open_file_white = OPEN_FILE_NEAR_KING_PENALTY
+        * (2 * __builtin_popcount(ph->open_near1[WHITE] & rq_b) + __builtin_popcount(ph->open_near2[WHITE] & rq_b));
+    const int open_file_black = OPEN_FILE_NEAR_KING_PENALTY
+        * (2 * __builtin_popcount(ph->open_near1[BLACK] & rq_c) + __builtin_popcount(ph->open_near2[BLACK] & rq_c));
+    const int king_shelter_raw = ph->shelter + open_file_white - open_file_black;
     const int king_shelter = king_shelter_raw * KING_SHELTER_WEIGHT * p256 / (100 * 256);
 
     const int bishop_pair_value = ((BISHOP_PAIR_MG) * p256 + (BISHOP_PAIR_EG) * (256 - p256)) / 256;
@@ -877,10 +1122,14 @@ static int eval_tapered(Position* pos) {
     const int pawn_terms =
         ((mg_pawn_terms * p256 + eg_pawn_terms * (256 - p256)) / 256) * PAWN_TERMS_WEIGHT / 100;
 
+    const int open_files =
+        ((mg_linie * p256 + eg_linie * (256 - p256)) / 256);
+#define OPEN_FILES_TERM + open_files
+
     const int mg = mg_pst + mg_passed + mg_mob;
     const int eg = eg_pst + eg_passed + eg_mob;
     const int positional = (mg * p256 + eg * (256 - p256)) / 256;
-    const int total = material + positional + king_zone_penalty + king_shelter + bishop_pair + pawn_terms;
+    const int total = material + positional + king_zone_penalty + king_shelter + bishop_pair + pawn_terms OPEN_FILES_TERM THREATS_TERM;
 
     if (eval_debug_enabled) {
 

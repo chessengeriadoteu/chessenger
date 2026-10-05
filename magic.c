@@ -136,7 +136,7 @@ static Bitboard random_sparse(void) {
     return random_u64() & random_u64() & random_u64();
 }
 
-static int find_magic(int square, int is_rook,
+static int find_magic(int square, int rook_sq,
                            Bitboard mask_bb, Bitboard *out_multiplier,
                            int *out_shift,
                            Bitboard *table_out, unsigned slots,
@@ -154,7 +154,7 @@ static int find_magic(int square, int is_rook,
 
     for (unsigned i = 0; i < num_subsets; i++) {
         occupancies[i] = nth_subset(i, mask_bb);
-        reference_attacks[i] = is_rook ? scan_rook(square, occupancies[i])
+        reference_attacks[i] = rook_sq ? scan_rook(square, occupancies[i])
                           : scan_bishop(square, occupancies[i]);
     }
 
@@ -165,19 +165,19 @@ static int find_magic(int square, int is_rook,
         if (count_bits((mask_bb * candidate) & 0xFF00000000000000ULL) < 6) continue;
 
         epoch++;
-        int magic_ok = 1;
+        int good = 1;
         for (unsigned i = 0; i < num_subsets; i++) {
             unsigned slot_index = (unsigned)((occupancies[i] * candidate) >> shift_bits);
-            if (slot_index >= slots) { magic_ok = 0; break; }
+            if (slot_index >= slots) { good = 0; break; }
             if (slot_epoch[slot_index] != epoch) {
                 slot_epoch[slot_index] = epoch;
                 table_out[slot_index] = reference_attacks[i];
             } else if (table_out[slot_index] != reference_attacks[i]) {
-                magic_ok = 0;
+                good = 0;
                 break;
             }
         }
-        if (magic_ok) {
+        if (good) {
 
             memset(table_out, 0, (size_t)slots * sizeof(Bitboard));
             for (unsigned i = 0; i < num_subsets; i++) {

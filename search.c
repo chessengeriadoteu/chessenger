@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND MIT
  * Copyright (C) Dariusz Domagała
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
- * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-09-21.
+ * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-10-05.
  */
 #define RFP_MARGIN 150
 #include "search.h"
@@ -542,11 +542,13 @@ int negamax_with_pv(Position* pos, int depth, int alpha, int beta, int ply, Sear
             eval_stack_valid[ply] = false;
         } else {
 
+            bool hs_from_tt = false; (void)hs_from_tt;
             if (!have_static_eval) {
                 int tt_eval;
                 if (tt_node_value(&main_tt, tt_key, &tt_eval, ply)) {
                     static_eval      = tt_eval;
                     have_static_eval = true;
+                    hs_from_tt = true;
                 }
             }
             if (!have_static_eval) {

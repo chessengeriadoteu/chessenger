@@ -12,16 +12,19 @@ typedef enum {
     HASH_ALPHA,
     HASH_BETA,
     HASH_EXACT
+    , HASH_NONE
 } HashFlag;
 
 typedef struct {
     uint64_t key;
     int16_t  score;
+    int16_t  eval;
     uint16_t best_move;
-    int16_t  depth;
-    uint8_t  flag;
-    uint8_t  age;
+    uint8_t  depth;
+    uint8_t  genflag;
 } HashEntry;
+#define TT_EVAL_NONE 32001
+#define TT_BUCKET   4
 
 typedef struct {
     HashEntry* entries;
@@ -59,6 +62,17 @@ bool probe_hash(TranspositionTable* tt, uint64_t key, int depth, int alpha, int 
 bool probe_hash_entry(TranspositionTable* tt, uint64_t key, int* depth, int* flag, int* score, int ply);
 
 bool tt_node_value(TranspositionTable* tt, uint64_t key, int* score, int ply);
+
+typedef struct {
+    bool     result_bb;
+    int      depth, flag, score, eval;
+    uint16_t mv;
+} TTProbe;
+bool tt_probe_entry(TranspositionTable* tt, uint64_t key, int ply, TTProbe* out);
+
+void store_hash_eval(TranspositionTable* tt, uint64_t key, int depth, int score, HashFlag flag, Move best_move, int ply, int eval);
+
+void tt_store_eval(TranspositionTable* tt, uint64_t key, int eval);
 
 extern TranspositionTable main_tt;
 

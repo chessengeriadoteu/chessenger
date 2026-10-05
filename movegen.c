@@ -897,16 +897,16 @@ int generate_legal_evasions(Position* pos, Move* moves) {
     return legal_count;
 }
 
-static int generate_noisy_internal(Position* pos, Move* moves) {
+static int generate_noisy_internal(Position* pos, Move* moves, bool use_target_mask) {
     Move buf_area[MAX_MOVES];
     int total_moves = 0;
     const Color    us   = pos->to_move;
     const Bitboard opp_color  = pos->occupied[1 - us];
 
     const Bitboard prom = (us == WHITE) ? rank_masks[7] : rank_masks[0];
-    g_targets = opp_color | prom;
+    if (use_target_mask) g_targets = opp_color | prom;
     total_moves = generate_pawn_moves(pos, buf_area, total_moves);
-    g_targets = opp_color;
+    if (use_target_mask) g_targets = opp_color;
     total_moves = generate_piece_moves(pos, buf_area, total_moves);
     total_moves = generate_king_moves(pos, buf_area, total_moves);
     g_targets = ~0ULL;
@@ -924,7 +924,7 @@ static int generate_noisy_internal(Position* pos, Move* moves) {
 
 int generate_noisy_moves(Position* pos, Move* moves) {
     if (!pos || !moves) return 0;
-    return generate_noisy_internal(pos, moves);
+    return generate_noisy_internal(pos, moves, 1);
 }
 
 int generate_legal_noisy(Position* pos, Move* moves) {

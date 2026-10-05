@@ -1,5 +1,8 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later
+/* SPDX-License-Identifier: GPL-3.0-or-later AND MIT
  * Copyright (C) Dariusz Domagała
+ * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
+ * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
+ * Portions of this file are adapted from OliThink 5.10.5 and Stash 37. Modified by Dariusz Domagała, 2026-10-05.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +19,7 @@
 #include "utils.h"
 #include "search.h"
 
-#define ENGINE_VERSION "0.9"
+#define ENGINE_VERSION "1.0"
 
 bool position_changed = false;
 bool stop_requested = false;
@@ -294,6 +297,8 @@ float assess_position_complexity(Position* pos) {
 
     return complexity > 2.0f ? 2.0f : complexity;
 }
+
+#include <math.h>
 
 static int tm_flexible = 0;
 
@@ -875,6 +880,15 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
                                                       : (int)(tm_soft * 5 / 2))
                                    : time_limit_ms;
     bool tm_move_changed = false;
+
+    static const double cs_stability_scale[5] = {2.50, 1.20, 0.90, 0.80, 0.75};
+    int  cs_stab = 0;
+    long long cs_optimal = tm_hard;
+    bool cs_only_move = false;
+    if (tm_soft) {
+        Move only_move_buf[256];
+        cs_only_move = (generate_legal_moves(pos, only_move_buf) == 1);
+    }
     set_search_time_limit(tm_hard);
     start_search_timer();
     new_search_reset();
@@ -894,6 +908,10 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
 
         if (depth > 1) {
             long long elapsed_before = time_diff_ms(start_time, get_wall_time());
+            if (tm_soft) {
+
+                if (elapsed_before >= cs_optimal) break;
+            } else
             if (tm_soft) {
 
                 bool past_soft = elapsed_before > tm_soft * 0.9;
@@ -937,6 +955,21 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
                           && (current_best.from != best_move.from
                               || current_best.to != best_move.to
                               || current_best.promotion != best_move.promotion);
+
+        if (tm_soft) {
+            cs_stab = (!valid_move_found || tm_move_changed) ? 0
+                    : (cs_stab < 4 ? cs_stab + 1 : 4);
+            double time_scale = cs_only_move ? 0.2 : 1.0;
+            time_scale *= cs_stability_scale[cs_stab];
+            if (valid_move_found) {
+                int score_drop = previous_score - info.score;
+                if (score_drop >  100) score_drop =  100;
+                if (score_drop < -100) score_drop = -100;
+                time_scale *= pow(2.0, score_drop / 100.0);
+            }
+            long long opt = (long long)(tm_soft * time_scale);
+            cs_optimal = opt < tm_hard ? opt : tm_hard;
+        }
 
         best_move = current_best;
         valid_move_found = true;
@@ -1113,6 +1146,10 @@ int main() {
             clear_tt(&main_tt);
             clear_killers();
             clear_history();
+            {
+                extern void search_new_game(void);
+                search_new_game();
+            }
             position_desync = false; position_desync_reason[0] = '\0';
         } else if (strcmp(input, "uci") == 0) {
 

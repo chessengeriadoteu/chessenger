@@ -1,11 +1,11 @@
-# Chessenger 0.9
+# Chessenger 1.0
 
 Chessenger is a UCI chess engine in C99, written by AI coding assistants under the direction of Dariusz Domagała
 (see [How Chessenger is made](#how-chessenger-is-made)).
 
-- Version: 0.9 (code date 2026-09-21)
-- Strength: 2932.38 [2919.52, 2945.24] (run A143: 2000 games, Ordo anchored to MCERL ratings; earlier run A142: 2921.39)
-- What is new: Evaluation weights partly based on 4ku 5.1; tuned search and time management.
+- Version: 1.0 (code date 2026-10-05)
+- Strength: 3052.07 [3037.27, 3066.92] (runs A166 and A167: 1500 games, Ordo anchored to MCERL ratings)
+- What is new: Late move reductions, continuation history, singular extensions, ProbCut, king safety and time management adapted from Stash 37; transposition table modelled on it; rooks score open files; pawn hash table; search depth up to 128 plies.
 
 ## How Chessenger is made
 
@@ -40,7 +40,7 @@ which the author maintains. Chessenger played with one thread. A rating is the o
 Elo difference measured in the games, and it belongs to the measured binary. MCERL ratings are not directly
 comparable with other rating lists such as CCRL or CEGT.
 
-2000 games, 400 against each of five engines from MCERL (Counter, Crafty, Fruit Reloaded, Igel, OliThink), at 2 s + 0.2 s per move, Hash 128 MB, on a Mac mini M4 Pro, rated with Ordo anchored to their MCERL ratings. An earlier run of 1000 games against the same five engines on a MacBook Pro M1 Pro gave 2921.39 [2902.23, 2940.47].
+1500 games against ten engines from MCERL (Komodo CCT, Senpai, Rice, Rodent, Polaris, Counter, Crafty, Patricia, OliThink, Toga), at 2 s + 0.2 s per move, Hash 128 MB: 760 games on a Mac mini M4 Pro and 740 on a MacBook Pro M1 Pro, rated together with Ordo anchored to their MCERL ratings.
 
 ## About the source
 
@@ -62,15 +62,15 @@ make release    # all binaries into dist/ (Linux and Windows need zig)
 
 | File | For |
 |---|---|
-| `chessenger-0.9-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
-| `chessenger-0.9-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
-| `chessenger-0.9-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
-| `chessenger-0.9-linux-arm64.tar.gz` | Linux, ARM64 (static) |
-| `chessenger-0.9-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
-| `chessenger-0.9-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
-| `chessenger-0.9-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
-| `chessenger-0.9-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
-| `chessenger-0.9-windows-arm64.zip` | Windows on ARM (ARM64) |
+| `chessenger-1.0-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
+| `chessenger-1.0-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
+| `chessenger-1.0-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
+| `chessenger-1.0-linux-arm64.tar.gz` | Linux, ARM64 (static) |
+| `chessenger-1.0-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
+| `chessenger-1.0-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
+| `chessenger-1.0-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
+| `chessenger-1.0-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
+| `chessenger-1.0-windows-arm64.zip` | Windows on ARM (ARM64) |
 
 Each archive holds the binary, `LICENSE`, `README.md` and, where the version has one, `LICENSES/`.
 
@@ -79,7 +79,7 @@ If unsure on Windows, take `avx2`; on Windows on ARM, take `arm64`.
 ## UCI
 
 Use Chessenger with a UCI chess GUI or from the command line.
-The engine reports itself as `id name Chessenger 0.9`.
+The engine reports itself as `id name Chessenger 1.0`.
 
 ### Commands
 
@@ -122,6 +122,7 @@ Commands outside the UCI protocol, for testing:
 - Oliver Brausch, for OliThink 5.10.5, which our search is adapted from (MIT license, see `LICENSES/OLITHINK-MIT.txt`).
 - Ronald Friederich, for PeSTO's piece-square tables.
 - kz04px, for 4ku, which some of our evaluation weights are based on.
+- Morgan Houppin, for Stash 37, which parts of our search (late move reductions, continuation history, singular extensions, ProbCut), our king safety evaluation and our time management are adapted from.
 - Tomasz Michniewski, for the Simplified Evaluation Function on the Chess Programming Wiki, whose piece-square tables our `eval_data.h` is based on.
 - The Chess Programming Wiki and its authors.
 

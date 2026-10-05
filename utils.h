@@ -10,7 +10,8 @@
 #include <sys/time.h>
 
 #define MAX_MOVES 256
-#define MAX_DEPTH 32
+
+#define MAX_DEPTH 128
 #define MATE_SCORE 30000
 
 #define MAX_QUIESCENCE_DEPTH 8
