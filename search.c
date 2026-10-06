@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND MIT
  * Copyright (C) Dariusz Domagała
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
- * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-10-05.
+ * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-10-06.
  */
 #define RFP_MARGIN 150
 #include "search.h"

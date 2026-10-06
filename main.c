@@ -1,8 +1,7 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later AND MIT
+/* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) Dariusz Domagała
- * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
- * Portions of this file are adapted from OliThink 5.10.5 and Stash 37. Modified by Dariusz Domagała, 2026-10-05.
+ * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-06.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,8 +17,9 @@
 #include "tt.h"
 #include "utils.h"
 #include "search.h"
+#include "tune.h"
 
-#define ENGINE_VERSION "1.0"
+#define ENGINE_VERSION "1.6"
 
 bool position_changed = false;
 bool stop_requested = false;
@@ -723,18 +723,21 @@ static Move search_root_with_aspiration(Position* pos, int depth, int previous_s
     {
         Move best_found = {0};
 
-        delta = 18;
+        int search_depth_cur = depth;
+
+        delta = 0;
         *window_open = false;
-        if (use_aspiration && depth > 6) {
-            alpha = previous_score - 13;
-            beta  = previous_score + 13;
+        if (use_aspiration && depth > 8) {
+            delta = ASP_DELTA0 + (previous_score < 0 ? -previous_score : previous_score) / ASP_DIV;
+            alpha = previous_score - delta;
+            beta  = previous_score + delta;
         }
 
         while (true) {
             if (alpha < -2 * QUEEN_VALUE) alpha = ROOT_FULL_ALPHA;
             if (beta  >  2 * QUEEN_VALUE) beta  = ROOT_FULL_BETA;
 
-            best_found = search_single_depth_with_nodes(pos, depth, alpha, beta, info);
+            best_found = search_single_depth_with_nodes(pos, search_depth_cur, alpha, beta, info);
 
             if (stop_requested || position_changed || is_time_exceeded()) {
                 *window_open = (info->score <= alpha && alpha > ROOT_FULL_ALPHA) ||
@@ -743,14 +746,16 @@ static Move search_root_with_aspiration(Position* pos, int depth, int previous_s
             }
 
             if (info->score <= alpha && alpha > ROOT_FULL_ALPHA) {
-                alpha -= delta;
+                search_depth_cur = depth;
                 beta   = (alpha + beta) / 2;
+                alpha  = info->score - delta;
             } else if (info->score >= beta && beta < ROOT_FULL_BETA) {
-                beta += delta;
+                search_depth_cur -= (search_depth_cur - 1 > (depth - 1) / 2);
+                beta   = info->score + delta;
             } else {
                 break;
             }
-            delta += delta * 2 / 3;
+            delta += delta * ASP_GROW / 256;
         }
         return best_found;
     }
@@ -1125,6 +1130,7 @@ int main() {
     init_zobrist();
     init_tt(&main_tt, TT_HASH_MB_DEFAULT);
     init_search();
+    endgame_init();
 
     Position pos;
     setup_starting_position(&pos);

@@ -44,11 +44,11 @@ void recompute_material(Position* pos) {
     int phase_sum   = 0;
     for (Color color = WHITE; color <= BLACK; color++) {
         const int sign = (color == WHITE) ? 1 : -1;
-        balance += sign * __builtin_popcountll(pos->pieces[color][PAWN])   * PAWN_VALUE;
-        balance += sign * __builtin_popcountll(pos->pieces[color][ROOK])   * ROOK_VALUE;
-        balance += sign * __builtin_popcountll(pos->pieces[color][KNIGHT]) * KNIGHT_VALUE;
-        balance += sign * __builtin_popcountll(pos->pieces[color][BISHOP]) * BISHOP_VALUE;
-        balance += sign * __builtin_popcountll(pos->pieces[color][QUEEN])  * QUEEN_VALUE;
+        balance += sign * __builtin_popcountll(pos->pieces[color][PAWN])   * MATERIAL_VALUE(PAWN);
+        balance += sign * __builtin_popcountll(pos->pieces[color][ROOK])   * MATERIAL_VALUE(ROOK);
+        balance += sign * __builtin_popcountll(pos->pieces[color][KNIGHT]) * MATERIAL_VALUE(KNIGHT);
+        balance += sign * __builtin_popcountll(pos->pieces[color][BISHOP]) * MATERIAL_VALUE(BISHOP);
+        balance += sign * __builtin_popcountll(pos->pieces[color][QUEEN])  * MATERIAL_VALUE(QUEEN);
         phase_sum   += __builtin_popcountll(pos->pieces[color][QUEEN])  * 9;
         phase_sum   += __builtin_popcountll(pos->pieces[color][ROOK])   * 5;
         phase_sum   += __builtin_popcountll(pos->pieces[color][BISHOP]) * 3;
@@ -60,11 +60,11 @@ void recompute_material(Position* pos) {
 
 static int piece_material_value(PieceType t) {
     switch (t) {
-        case PAWN:   return PAWN_VALUE;
-        case ROOK:   return ROOK_VALUE;
-        case KNIGHT: return KNIGHT_VALUE;
-        case BISHOP: return BISHOP_VALUE;
-        case QUEEN:  return QUEEN_VALUE;
+        case PAWN:   return MATERIAL_VALUE(PAWN);
+        case ROOK:   return MATERIAL_VALUE(ROOK);
+        case KNIGHT: return MATERIAL_VALUE(KNIGHT);
+        case BISHOP: return MATERIAL_VALUE(BISHOP);
+        case QUEEN:  return MATERIAL_VALUE(QUEEN);
         default:     return 0;
     }
 }
@@ -368,7 +368,7 @@ void make_move_full(Position* pos, Move* move, UndoInfo* undo) {
         const int own_sign = (us == WHITE) ? 1 : -1;
         if (move->is_en_passant) {
 
-            pos->mat_balance += own_sign * PAWN_VALUE;
+            pos->mat_balance += own_sign * MATERIAL_VALUE(PAWN);
         } else {
             if (move->captured != EMPTY) {
 
@@ -377,7 +377,7 @@ void make_move_full(Position* pos, Move* move, UndoInfo* undo) {
             }
             if (move->promotion != EMPTY) {
 
-                pos->mat_balance += own_sign * (piece_material_value(move->promotion) - PAWN_VALUE);
+                pos->mat_balance += own_sign * (piece_material_value(move->promotion) - MATERIAL_VALUE(PAWN));
                 pos->mat_phase   += phase_weight(move->promotion);
             }
         }

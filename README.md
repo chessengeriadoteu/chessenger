@@ -1,11 +1,11 @@
-# Chessenger 1.0
+# Chessenger 1.6
 
 Chessenger is a UCI chess engine in C99, written by AI coding assistants under the direction of Dariusz Domagała
 (see [How Chessenger is made](#how-chessenger-is-made)).
 
-- Version: 1.0 (code date 2026-10-05)
-- Strength: 3052.07 [3037.27, 3066.92] (runs A166 and A167: 1500 games, Ordo anchored to MCERL ratings)
-- What is new: Late move reductions, continuation history, singular extensions, ProbCut, king safety and time management adapted from Stash 37; transposition table modelled on it; rooks score open files; pawn hash table; search depth up to 128 plies.
+- Version: 1.6 (code date 2026-10-06)
+- Strength: 3146.12 [3130.90, 3161.70] (runs A190 and A191: 1500 games, Ordo anchored to MCERL ratings)
+- What is new: Search, king safety, endgame rules with a KPK bitbase and time management adapted from Stash 37; transposition table modelled on it; evaluation weights and piece values retuned; versions 1.1 to 1.5 were not published.
 
 ## How Chessenger is made
 
@@ -32,6 +32,30 @@ or break legal play or the UCI protocol?
 
 Every strength figure in this repository comes from games; where a version was not measured on its own, its
 README says how the figure was obtained. The author is responsible for the code and for everything published here.
+
+## All versions
+
+Every version is a tagged commit in this repository (`v0.1` … `v1.6`); from 0.2 on its GitHub Release carries the binaries.
+Version numbers follow playing strength, not dates: 0.6 and 0.7 were skipped on purpose,
+1.1 to 1.5 were not published, and 2.0 will be the first version with a neural network.
+
+| Version | Code date | Strength (CElo, MCERL scale) | Notes |
+|---|---|---|---|
+| 0.1 | 2002-07-05 | not measured | Sedar, the predecessor: separate code from 2002 |
+| 0.2 | 2026-08-09 | not measured | First Chessenger: bitboards, alpha-beta with quiescence search, transposition table, UCI. |
+| 0.3 | 2026-08-24 | about 1950 (two runs: 1943.56 and 1962.74) | Magic bitboards for sliding pieces; many search and evaluation fixes. |
+| 0.4 | 2026-09-02 | 2186.24 [2143.17, 2229.32] (chained anchor, run A76) | First UCI options (Hash, MultiPV, Clear Hash, Ponder); search and move ordering work. |
+| 0.5 | 2026-09-08 | 2593.14 [2574.00, 2612.63] (run A111: 1000 games against Fruit 1.0, MCERL 2536) | New evaluation built on the PeSTO piece-square tables. |
+| 0.8 | 2026-09-12 | 2872.78 [2852.48, 2894.25] (run A119: 1000 games against Berserk 2.0.0, MCERL 2700) | New search adapted from OliThink 5.10.5; versions 0.6 and 0.7 were skipped on purpose. |
+| 0.9 | 2026-09-21 | 2932.38 [2919.52, 2945.24] (run A143: 2000 games, Ordo anchored to MCERL ratings; earlier run A142: 2921.39) | Evaluation weights partly based on 4ku 5.1; tuned search and time management. |
+| 1.0 | 2026-10-05 | 3052.07 [3037.27, 3066.92] (runs A166 and A167: 1500 games, Ordo anchored to MCERL ratings) | Late move reductions, continuation history, singular extensions, ProbCut, king safety and time management adapted from Stash 37; transposition table modelled on it; rooks score open files; pawn hash table; search depth up to 128 plies. |
+| 1.6 | 2026-10-06 | 3146.12 [3130.90, 3161.70] (runs A190 and A191: 1500 games, Ordo anchored to MCERL ratings) | Search, king safety, endgame rules with a KPK bitbase and time management adapted from Stash 37; transposition table modelled on it; evaluation weights and piece values retuned; versions 1.1 to 1.5 were not published. |
+
+## Lineage
+
+Sedar (0.1) is a chess program the author wrote in 2002. Chessenger shares no code with it.
+Chessenger itself was started from scratch in 2025 with AI coding assistants (see How Chessenger is made),
+and from 2026 on developed through measured experiments.
 
 ## How strength was measured
 
@@ -62,15 +86,15 @@ make release    # all binaries into dist/ (Linux and Windows need zig)
 
 | File | For |
 |---|---|
-| `chessenger-1.0-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
-| `chessenger-1.0-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
-| `chessenger-1.0-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
-| `chessenger-1.0-linux-arm64.tar.gz` | Linux, ARM64 (static) |
-| `chessenger-1.0-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
-| `chessenger-1.0-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
-| `chessenger-1.0-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
-| `chessenger-1.0-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
-| `chessenger-1.0-windows-arm64.zip` | Windows on ARM (ARM64) |
+| `chessenger-1.6-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
+| `chessenger-1.6-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
+| `chessenger-1.6-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
+| `chessenger-1.6-linux-arm64.tar.gz` | Linux, ARM64 (static) |
+| `chessenger-1.6-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
+| `chessenger-1.6-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
+| `chessenger-1.6-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
+| `chessenger-1.6-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
+| `chessenger-1.6-windows-arm64.zip` | Windows on ARM (ARM64) |
 
 Each archive holds the binary, `LICENSE`, `README.md` and, where the version has one, `LICENSES/`.
 
@@ -79,7 +103,7 @@ If unsure on Windows, take `avx2`; on Windows on ARM, take `arm64`.
 ## UCI
 
 Use Chessenger with a UCI chess GUI or from the command line.
-The engine reports itself as `id name Chessenger 1.0`.
+The engine reports itself as `id name Chessenger 1.6`.
 
 ### Commands
 
@@ -122,7 +146,8 @@ Commands outside the UCI protocol, for testing:
 - Oliver Brausch, for OliThink 5.10.5, which our search is adapted from (MIT license, see `LICENSES/OLITHINK-MIT.txt`).
 - Ronald Friederich, for PeSTO's piece-square tables.
 - kz04px, for 4ku, which some of our evaluation weights are based on.
-- Morgan Houppin, for Stash 37, which parts of our search (late move reductions, continuation history, singular extensions, ProbCut), our king safety evaluation and our time management are adapted from.
+- Morgan Houppin, for Stash 37, which much of our search, king safety, endgame code (including the KPK bitbase) and time management is adapted from.
+- The Stockfish developers, for Stockfish: the KPK bitbase in Stash 37, which ours is adapted from, follows the one in Stockfish's `bitbase.cpp`.
 - Tomasz Michniewski, for the Simplified Evaluation Function on the Chess Programming Wiki, whose piece-square tables our `eval_data.h` is based on.
 - The Chess Programming Wiki and its authors.
 

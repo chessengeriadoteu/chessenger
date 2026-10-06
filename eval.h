@@ -11,13 +11,15 @@
 #define KNIGHT_VALUE 320
 #define BISHOP_VALUE 330
 #define QUEEN_VALUE  1000
-#define KING_VALUE   0
 
 #define BISHOP_PAIR_BONUS 50
 
 void set_eval_debug(bool enable);
 
 int evaluate_position(Position* pos);
+void endgame_init(void);
+int is_endgame_special(const Position* pos);
+int scale_material_balance(const Position* pos, int balance);
 
 int evaluate_material(Position* pos);
 int evaluate_position_simple(Position* pos);
@@ -45,5 +47,8 @@ extern Bitboard king_attacks[64];
 
 const int* get_king_middlegame_pst(void);
 const int* get_king_endgame_pst(void);
+
+extern const int* const material_values_ptr;
+#define MATERIAL_VALUE(t) (material_values_ptr[t])
 
 #endif

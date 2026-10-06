@@ -76,4 +76,9 @@ void tt_store_eval(TranspositionTable* tt, uint64_t key, int eval);
 
 extern TranspositionTable main_tt;
 
+static inline void tt_prefetch(const TranspositionTable* tt, uint64_t key) {
+    __builtin_prefetch(&tt->entries[(key & (uint64_t)tt->mask) & ~(uint64_t)(TT_BUCKET - 1)]);
+}
+#  define TT_PF(key) tt_prefetch(&main_tt, (key))
+
 #endif 
