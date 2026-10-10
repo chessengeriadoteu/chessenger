@@ -5,6 +5,7 @@
 #define EVAL_H
 
 #include "board.h"
+#include "smp.h"
 
 #define PAWN_VALUE   100
 #define ROOK_VALUE   525
@@ -40,7 +41,7 @@ int evaluate_anti_grabby_patterns(Position* pos);
 
 int evaluate_hung_pieces(Position* pos);
 
-extern int hung_penalty_stm;
+extern SMP_TLS int hung_penalty_stm;
 
 extern Bitboard knight_attacks[64];
 extern Bitboard king_attacks[64];

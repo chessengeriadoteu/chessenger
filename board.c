@@ -10,6 +10,9 @@
 #include <string.h>
 #include <ctype.h>
 
+bool uci_chess960 = false;
+int castle_rook_sq[4] = { 7, 0, 63, 56 };
+
 bool is_position_legal(const Position *pos) {
     if (!pos) return false;
 
@@ -108,6 +111,7 @@ void setup_starting_position(Position* pos) {
 
     pos->to_move = WHITE;
     pos->castling_rights = WHITE_KINGSIDE | WHITE_QUEENSIDE | BLACK_KINGSIDE | BLACK_QUEENSIDE;
+    castle_rook_sq[0] = 7; castle_rook_sq[1] = 0; castle_rook_sq[2] = 63; castle_rook_sq[3] = 56;
     pos->en_passant_square = -1;
     pos->halfmove_clock = 0;
     pos->fullmove_number = 1;
@@ -220,15 +224,43 @@ bool parse_fen(Position* pos, const char* fen) {
     tmp.to_move = (tokens[1][0] == 'w') ? WHITE : BLACK;
 
     tmp.castling_rights = 0;
+    int rook_sq[4] = { 7, 0, 63, 56 };
     if (!(tokens[2][0] == '-' && tokens[2][1] == '\0')) {
         for (int i = 0; tokens[2][i]; i++) {
             int bit;
-            switch (tokens[2][i]) {
+            const char c = tokens[2][i];
+            switch (c) {
                 case 'K': bit = WHITE_KINGSIDE; break;
                 case 'Q': bit = WHITE_QUEENSIDE; break;
                 case 'k': bit = BLACK_KINGSIDE; break;
                 case 'q': bit = BLACK_QUEENSIDE; break;
-                default: return fen_fail("FEN castling field must be '-' or a subset of KQkq");
+                default:
+                    if (!uci_chess960 || !((c >= 'A' && c <= 'H') || (c >= 'a' && c <= 'h')))
+                        return fen_fail("FEN castling field must be '-' or a subset of KQkq");
+                    bit = 0;
+                    break;
+            }
+            if (uci_chess960) {
+
+                const Color kol = (c == 'K' || c == 'Q' || (c >= 'A' && c <= 'H')) ? WHITE : BLACK;
+                const int back_rank_base = (kol == WHITE) ? 0 : 56;
+                const Bitboard kr = tmp.pieces[kol][KING] & (0xFFULL << back_rank_base);
+                const Bitboard rook_sliders = tmp.pieces[kol][ROOK] & (0xFFULL << back_rank_base);
+                if (!kr) continue;
+                const int ksq = get_lsb(kr);
+                int at_sq = -1;
+                if (c == 'K' || c == 'k') {
+                    for (int s = back_rank_base + 7; s > ksq && at_sq < 0; s--) if (rook_sliders & (1ULL << s)) at_sq = s;
+                } else if (c == 'Q' || c == 'q') {
+                    for (int s = back_rank_base; s < ksq && at_sq < 0; s++) if (rook_sliders & (1ULL << s)) at_sq = s;
+                } else {
+                    const int s = back_rank_base + ((c | 0x20) - 'a');
+                    if (s != ksq && (rook_sliders & (1ULL << s))) at_sq = s;
+                }
+                if (at_sq < 0) continue;
+                bit = (kol == WHITE) ? ((at_sq > ksq) ? WHITE_KINGSIDE : WHITE_QUEENSIDE)
+                                     : ((at_sq > ksq) ? BLACK_KINGSIDE : BLACK_QUEENSIDE);
+                rook_sq[__builtin_ctz(bit)] = at_sq;
             }
             if (tmp.castling_rights & bit) {
                 return fen_fail("FEN castling field repeats a right");
@@ -282,6 +314,7 @@ bool parse_fen(Position* pos, const char* fen) {
     recompute_material(&tmp);
 
     *pos = tmp;
+    for (int i = 0; i < 4; i++) castle_rook_sq[i] = rook_sq[i];
     fen_error_msg[0] = '\0';
     return true;
 }
@@ -310,7 +343,17 @@ void make_move_full(Position* pos, Move* move, UndoInfo* undo) {
     pos->pieces[us][move->piece] &= ~(1ULL << move->from);
     pos->occupied[us] &= ~(1ULL << move->from);
 
-    if (move->is_castling) {
+    if (move->is_castling && uci_chess960) {
+
+        int king_to, rook_to;
+        castle_960_squares(move->from, move->to, &king_to, &rook_to);
+        pos->pieces[us][ROOK] &= ~(1ULL << move->to);
+        pos->occupied[us] &= ~(1ULL << move->to);
+        pos->pieces[us][KING] |= (1ULL << king_to);
+        pos->pieces[us][ROOK] |= (1ULL << rook_to);
+        pos->occupied[us] |= (1ULL << king_to) | (1ULL << rook_to);
+
+    } else if (move->is_castling) {
 
         pos->pieces[us][KING] |= (1ULL << move->to);
         pos->occupied[us] |= (1ULL << move->to);
@@ -390,20 +433,21 @@ void make_move_full(Position* pos, Move* move, UndoInfo* undo) {
             pos->castling_rights &= ~(BLACK_KINGSIDE | BLACK_QUEENSIDE);
         }
     } else if (move->piece == ROOK) {
+
         if (us == WHITE) {
-            if (move->from == 0) pos->castling_rights &= ~WHITE_QUEENSIDE;
-            if (move->from == 7) pos->castling_rights &= ~WHITE_KINGSIDE;
+            if (move->from == castle_rook_sq[1]) pos->castling_rights &= ~WHITE_QUEENSIDE;
+            if (move->from == castle_rook_sq[0]) pos->castling_rights &= ~WHITE_KINGSIDE;
         } else {
-            if (move->from == 56) pos->castling_rights &= ~BLACK_QUEENSIDE;
-            if (move->from == 63) pos->castling_rights &= ~BLACK_KINGSIDE;
+            if (move->from == castle_rook_sq[3]) pos->castling_rights &= ~BLACK_QUEENSIDE;
+            if (move->from == castle_rook_sq[2]) pos->castling_rights &= ~BLACK_KINGSIDE;
         }
     }
 
     if (move->captured == ROOK) {
-        if (move->to == 0) pos->castling_rights &= ~WHITE_QUEENSIDE;
-        if (move->to == 7) pos->castling_rights &= ~WHITE_KINGSIDE;
-        if (move->to == 56) pos->castling_rights &= ~BLACK_QUEENSIDE;
-        if (move->to == 63) pos->castling_rights &= ~BLACK_KINGSIDE;
+        if (move->to == castle_rook_sq[1]) pos->castling_rights &= ~WHITE_QUEENSIDE;
+        if (move->to == castle_rook_sq[0]) pos->castling_rights &= ~WHITE_KINGSIDE;
+        if (move->to == castle_rook_sq[3]) pos->castling_rights &= ~BLACK_QUEENSIDE;
+        if (move->to == castle_rook_sq[2]) pos->castling_rights &= ~BLACK_KINGSIDE;
     }
 
     pos->en_passant_square = -1;
@@ -433,7 +477,14 @@ void make_move_full(Position* pos, Move* move, UndoInfo* undo) {
 
         h ^= zobrist_pieces[us][move->piece][move->from];
 
-        if (move->is_castling) {
+        if (move->is_castling && uci_chess960) {
+
+            int king_to, rook_to;
+            castle_960_squares(move->from, move->to, &king_to, &rook_to);
+            h ^= zobrist_pieces[us][KING][king_to];
+            h ^= zobrist_pieces[us][ROOK][move->to];
+            h ^= zobrist_pieces[us][ROOK][rook_to];
+        } else if (move->is_castling) {
 
             h ^= zobrist_pieces[us][KING][move->to];
             int rook_from = -1, rook_to = -1;
@@ -490,7 +541,18 @@ void undo_move_full(Position* pos, Move* move, UndoInfo* undo) {
     pos->history_count = undo->old_history_count;
     pos->history_base = undo->old_history_base;
 
-    if (undo->was_castling) {
+    if (undo->was_castling && uci_chess960) {
+
+        int king_to, rook_to;
+        castle_960_squares(move->from, move->to, &king_to, &rook_to);
+        pos->pieces[us][KING] &= ~(1ULL << king_to);
+        pos->pieces[us][ROOK] &= ~(1ULL << rook_to);
+        pos->occupied[us] &= ~((1ULL << king_to) | (1ULL << rook_to));
+        pos->pieces[us][KING] |= (1ULL << move->from);
+        pos->pieces[us][ROOK] |= (1ULL << move->to);
+        pos->occupied[us] |= (1ULL << move->from) | (1ULL << move->to);
+
+    } else if (undo->was_castling) {
         pos->pieces[us][KING] &= ~(1ULL << move->to);
         pos->occupied[us] &= ~(1ULL << move->to);
         pos->pieces[us][KING] |= (1ULL << move->from);

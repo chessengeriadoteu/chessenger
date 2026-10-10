@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) Dariusz Domagała
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
- * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-06.
+ * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-10.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/time.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -16,10 +17,17 @@
 #include "eval.h"
 #include "tt.h"
 #include "utils.h"
+#include "syzygy.h"
 #include "search.h"
 #include "tune.h"
 
-#define ENGINE_VERSION "1.6"
+#ifdef _WIN32
+#define NULL_DEVICE "NUL"
+#else
+#define NULL_DEVICE "/dev/null"
+#endif
+
+#define ENGINE_VERSION "2.0"
 
 bool position_changed = false;
 bool stop_requested = false;
@@ -32,10 +40,14 @@ int multipv_setting = MULTIPV_DEFAULT;
 
 #define THREADS_DEFAULT 1
 #define THREADS_MIN     1
-#define THREADS_MAX     1
+
+#define THREADS_MAX     64
 int threads_setting = THREADS_DEFAULT;
 
 static bool ponder_setting = false;
+
+#define MOVE_OVERHEAD_MAX 5000
+static int move_overhead_ms = 0;
 
 static char input_queue[MAX_UCI_LINE * 4] = "";
 static size_t input_queue_pos = 0;
@@ -152,6 +164,303 @@ static void drain_search_input(void) {
     }
 }
 
+#define BENCH_DEPTH 15
+static const char* const BENCH_FEN[] = {
+    "r2qk2r/1pp1nppp/pn2p3/4P3/2PP4/P1Q1BP1P/1P6/2KR1B1R b kq - 0 6",
+    "8/8/8/4K3/8/4R3/8/5k2 b - - 18 79",
+    "8/6p1/8/5k2/3K1P1b/8/8/8 w - - 6 65",
+    "8/4k3/1K6/4bBp1/PP4P1/8/8/8 b - - 2 49",
+    "4R3/8/7p/8/3p1r2/P7/7P/3k2K1 w - - 13 41",
+    "6k1/7p/6p1/p2P4/5r1P/1P2R3/4K3/4B1q1 w - - 0 42",
+    "r7/P7/1k1p4/Rnp5/8/4K3/8/4B3 w - - 7 63",
+    "8/2k5/7p/5Kp1/6P1/3R1P1P/8/r7 b - - 5 43",
+    "r2r2k1/pq1n1ppb/4p2p/2p4P/4P1P1/3N1Pb1/1PQ1B1K1/R4R2 w - - 0 25",
+    "r4nk1/p4pp1/1p5p/bBp5/8/P4PB1/1P4PP/3R2K1 b - - 4 17",
+    "1r2r1k1/Qp1q1pp1/2p2n2/N2pR3/1P4p1/P5P1/2R1P1BP/6K1 b - - 1 26",
+    "2q1r1k1/3r1pp1/1p1Pp2p/p1p5/4Q2N/P1B4P/KP4P1/3R4 b - - 3 23",
+    "8/5pkp/p4bp1/3P4/1RQ1P2P/2P2KP1/2r1NP2/3q4 w - - 2 35",
+    "4n1k1/2b2ppp/r1P1b3/p7/PpN5/1P1Pq1PP/2P2PBK/4R3 w - - 0 18",
+    "8/1R1nrpk1/2R3p1/2p1b2p/2P5/P4BPP/5P2/6K1 b - - 4 28",
+    "1r6/4R1p1/5nkp/1pB5/1P3PP1/7P/7K/8 b - - 0 41",
+    "1r6/5pk1/6p1/2p1p1P1/p1P1q3/6P1/P4QK1/5R2 w - - 1 39",
+    "1B4k1/p4p2/1p5p/1r3P2/8/8/5K1P/8 w - - 0 38",
+    "8/6k1/2R1bp2/4q1p1/PP1pP1Pp/3Q3P/8/5RK1 b - - 2 49",
+    "rn1q1rk1/5pbp/pp3np1/2pPp1B1/P7/1QN2B2/1P3PPP/R4RK1 b - - 3 4",
+    "R2q1rk1/1b1nbppp/2pppn2/8/1pPP4/1P2NNP1/1B2PPBP/3Q1RK1 b - - 0 9",
+    "8/3K4/8/2Q2P2/3Pq3/8/8/1k6 b - - 14 82",
+    "7k/1p2Q1pb/7p/p1Pr1P2/3p1qP1/1P2p2P/PB6/6RK w - - 2 41",
+    "8/6pp/4pk2/2Kp4/8/q7/1r6/8 w - - 6 57",
+    "8/8/4K3/8/8/p5k1/8/5q2 w - - 0 72",
+    "8/6p1/6P1/5b2/4kP2/6Kp/8/8 w - - 1 70",
+    "8/8/8/r2kpb2/4N3/p4KP1/5P2/R7 w - - 10 63",
+    "6rk/p1qp3n/4b2p/4Pp1B/2pB2P1/QP6/P4PP1/2R3K1 b - - 0 30",
+    "1R6/6k1/3rp3/1p3p2/1P3P1P/1B4P1/P2b2K1/8 b - - 4 41",
+    "r1r2nk1/4pp1p/1p1b2p1/3p1P2/pP1P4/Pq2P3/R2QBP1P/4NRK1 w - - 1 23",
+    "3qr1k1/n2rbpp1/p4n1p/1p1pB3/1P1P4/PBN2Q1P/2R2PP1/2R3K1 b - - 11 21",
+    "8/1pp3kp/3pBqp1/3P4/2P4P/rP4P1/P2QR2K/r7 w - - 7 42",
+    "8/8/2K1n2p/5pkP/3B4/1P2P3/5P2/8 b - - 4 42",
+    "3r4/P1R1n3/2n1pk1p/1B4p1/1p1P4/1N4P1/1P3P2/6K1 b - - 4 40",
+    "5r1k/pb6/1p4pp/nB2R1N1/8/P7/6PP/6K1 w - - 0 25",
+    "4q1k1/Q2Nbp2/1p2p1p1/3nN2p/1P1Pb3/Pn2B1P1/5PBP/6K1 b - - 3 20",
+    "r1q1r3/6kp/p2bp1p1/Pbp5/3pRP2/1P1B3Q/2PB2PP/5R1K b - - 4 18",
+    "r6r/p4k1p/b1p1p3/2Bn1p2/Pp6/2P3P1/4PPBP/2RR2K1 b - - 0 14",
+    "8/6R1/8/4P3/1p2K3/7p/5k2/5r2 w - - 11 56",
+    "3R4/1p6/1Pk4p/3p4/3Kp3/8/1P4r1/8 w - - 12 45",
+    "6k1/1R5p/2r2p2/1p3K2/p3NP2/6P1/2r5/R7 b - - 16 41",
+    "8/1p3k2/p2N4/P1Bn4/1b6/7P/4NP2/5K2 b - - 1 36",
+    "8/r5k1/4p3/3n1p1p/6pP/6P1/5R1K/1B6 w - - 0 52",
+    "5k2/6p1/4B3/5R2/3r2PP/5P2/4n2K/8 b - - 2 39",
+    "8/1b1nk1p1/1p5p/p1r2P2/P4KP1/PB6/2R3P1/4B3 b - - 0 42",
+    "r4rk1/pp2ppbp/1qn3p1/4Pb2/2BP4/5N1P/3B1PP1/2RQK2R w K - 4 16",
+    "5rk1/6p1/b3ppnp/p2q4/1p1N2P1/1P2BP1P/P4Q1K/3R4 w - - 1 20",
+    "7k/1b1n4/1p6/pP1B4/P4P2/7P/5PP1/5RK1 b - - 0 34",
+    "rn1qk2r/pbpp2pp/1p2p3/5p2/1bPP4/2nBPN2/PPQ2PPP/R1B2RK1 w kq - 0 2",
+    "1R6/8/8/8/2pb4/3q4/6K1/2k5 w - - 2 75",
+};
+#define BENCH_N ((int)(sizeof(BENCH_FEN) / sizeof(BENCH_FEN[0])))
+
+static long long go_depth_nodes_sum = 0;
+static bool bench_active = false;
+static int bench_depth = BENCH_DEPTH;
+static bool bench_from_cmdline = false;
+static long long bench_nodes_start = 0;
+static struct timeval bench_t0;
+static int bench_done = 0;
+static double bench_sec_total = 0.0;
+static int bench_stdout_copy = -1;
+
+static bool queue_push_front(const char* text) {
+    size_t n = strlen(text);
+    size_t remaining = strlen(input_queue + input_queue_pos);
+    if (n + remaining + 1 > sizeof(input_queue)) {
+        printf("info string ERROR: bench: input queue too small (%zu + %zu B)\n", n, remaining);
+        fflush(stdout);
+        return false;
+    }
+    memmove(input_queue + n, input_queue + input_queue_pos, remaining + 1);
+    memcpy(input_queue, text, n);
+    input_queue_pos = 0;
+    return true;
+}
+
+static void banner(FILE* f);
+
+static void bench_start(const char* input) {
+    int depth_arg = BENCH_DEPTH;
+    const char* arg = input + 5;
+    while (*arg == ' ') arg++;
+    if (*arg != '\0') {
+        int g = atoi(arg);
+        if (g >= 1 && g <= MAX_DEPTH) depth_arg = g;
+        else {
+            printf("info string bench: depth '%s' outside 1..%d, using %d\n",
+                   arg, MAX_DEPTH, BENCH_DEPTH);
+            fflush(stdout);
+        }
+    }
+    static char script[MAX_UCI_LINE * 2];
+    int u = snprintf(script, sizeof(script), "setoption name Hash value 128\nucinewgame\n");
+    for (int i = 0; i < BENCH_N && u > 0 && (size_t)u < sizeof(script); i++) {
+
+        u += snprintf(script + u, sizeof(script) - (size_t)u,
+                      "bench_update %d\nposition fen %s\ngo depth %d\n", i, BENCH_FEN[i], depth_arg);
+    }
+    if (u <= 0 || (size_t)u + sizeof("bench_end\n") > sizeof(script)) {
+        printf("info string ERROR: bench: command script does not fit the buffer\n");
+        fflush(stdout);
+        return;
+    }
+    snprintf(script + u, sizeof(script) - (size_t)u, "bench_end\n");
+    if (!queue_push_front(script)) return;
+    bench_active = true;
+    bench_queues_input = true;
+    bench_depth = depth_arg;
+    bench_nodes_start = go_depth_nodes_sum;
+    bench_t0 = get_wall_time();
+    bench_done = 0;
+    bench_sec_total = 0.0;
+
+    if (!bench_from_cmdline && bench_stdout_copy < 0) {
+        fflush(stdout);
+        int nul = open(NULL_DEVICE, O_WRONLY);
+        if (nul >= 0) {
+            bench_stdout_copy = dup(STDOUT_FILENO);
+            if (bench_stdout_copy >= 0) dup2(nul, STDOUT_FILENO);
+            close(nul);
+        }
+    }
+
+    if (bench_from_cmdline) banner(stderr);
+    if (isatty(STDERR_FILENO)) {
+        fprintf(stderr, "\n  \033[1mChessenger %s - bench\033[0m   %d positions - depth %d - Hash 128 MB - 1 thread\n\n",
+                ENGINE_VERSION, BENCH_N, depth_arg);
+        fflush(stderr);
+    }
+}
+
+static void bench_update(int done_count) {
+    bench_done = done_count;
+    long long ms = time_diff_ms(bench_t0, get_wall_time());
+    if (!isatty(STDERR_FILENO)) {
+        if (done_count < BENCH_N)
+            fprintf(stderr, "Position: %d/%d (%s)\n", done_count + 1, BENCH_N, BENCH_FEN[done_count]);
+        fflush(stderr);
+        return;
+    }
+    enum { BAR_WIDTH = 30 };
+    int filled = done_count * BAR_WIDTH / BENCH_N;
+    fprintf(stderr, "\r  \033[32m");
+    for (int i = 0; i < BAR_WIDTH; i++) {
+        if (i == filled) fputs("\033[90m", stderr);
+        fputs(i < filled ? "#" : ".", stderr);
+    }
+    if (done_count < BENCH_N)
+        fprintf(stderr, "\033[0m  position \033[1m%2d/%d\033[0m  %3d %%  %5.1f s ",
+                done_count + 1, BENCH_N, done_count * 100 / BENCH_N, ms / 1000.0);
+    else
+        fprintf(stderr, "\033[0m  \033[1;32mdone %d/%d\033[0m  100 %%  %5.1f s \n",
+                BENCH_N, BENCH_N, ms / 1000.0);
+    fflush(stderr);
+}
+
+#ifndef BUILD_FLAGS
+#define BUILD_FLAGS "?"
+#endif
+#ifndef BUILD_DATE
+#define BUILD_DATE "?"
+#endif
+#if defined(__APPLE__)
+#  if defined(__aarch64__) || defined(__arm64__)
+#    define BUILD_SYSTEM "macOS - Apple Silicon (arm64)"
+#  elif defined(__x86_64__)
+#    define BUILD_SYSTEM "macOS - Intel (x86_64)"
+#  else
+#    define BUILD_SYSTEM "macOS"
+#  endif
+#elif defined(_WIN32)
+#  if defined(_M_ARM64) || defined(__aarch64__)
+#    define BUILD_ARCH "arm64"
+#  elif defined(_M_X64) || defined(__x86_64__)
+#    define BUILD_ARCH "x64"
+#  else
+#    define BUILD_ARCH "x86"
+#  endif
+#  if defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0A00
+#    define BUILD_SYSTEM "Windows 10+ - " BUILD_ARCH
+#  elif defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0603
+#    define BUILD_SYSTEM "Windows 8.1+ - " BUILD_ARCH
+#  elif defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0601
+#    define BUILD_SYSTEM "Windows 7+ - " BUILD_ARCH
+#  else
+#    define BUILD_SYSTEM "Windows - " BUILD_ARCH
+#  endif
+#elif defined(__linux__)
+#  if defined(__x86_64__)
+#    define BUILD_SYSTEM "Linux - x86_64"
+#  elif defined(__aarch64__)
+#    define BUILD_SYSTEM "Linux - aarch64"
+#  else
+#    define BUILD_SYSTEM "Linux"
+#  endif
+#else
+#  define BUILD_SYSTEM "unknown system"
+#endif
+#define BUILD_STR_(x) #x
+#define BUILD_STR(x) BUILD_STR_(x)
+#if defined(__clang__) && defined(__apple_build_version__)
+#  define BUILD_COMPILER "Apple clang " BUILD_STR(__clang_major__) "." BUILD_STR(__clang_minor__) "." BUILD_STR(__clang_patchlevel__)
+#elif defined(__clang__)
+#  define BUILD_COMPILER "clang " BUILD_STR(__clang_major__) "." BUILD_STR(__clang_minor__) "." BUILD_STR(__clang_patchlevel__)
+#elif defined(__GNUC__)
+#  define BUILD_COMPILER "gcc " BUILD_STR(__GNUC__) "." BUILD_STR(__GNUC_MINOR__) "." BUILD_STR(__GNUC_PATCHLEVEL__)
+#elif defined(_MSC_VER)
+#  define BUILD_COMPILER "MSVC " BUILD_STR(_MSC_FULL_VER)
+#else
+#  define BUILD_COMPILER "unknown compiler"
+#endif
+#if defined(BUILD_PGO) && BUILD_PGO
+#  define BUILD_PGO_STR "PGO"
+#else
+#  define BUILD_PGO_STR "no PGO"
+#endif
+
+static void banner(FILE* f) {
+    fprintf(f, "===========================================================================\n"
+               "Chessenger %s\n"
+               "Build  : " BUILD_PGO_STR " - " BUILD_SYSTEM " - " BUILD_COMPILER " - " BUILD_FLAGS "\n"
+               "Built  : " BUILD_DATE "\n"
+               "Author : Dariusz Domagala (chessengeria.eu) - UCI chess engine\n"
+               "===========================================================================\n",
+            ENGINE_VERSION);
+    fflush(f);
+}
+
+static void bench_row(Move* mv, Position* pos, int result_bb, int depth_arg,
+                         struct timeval t0, long long node_count) {
+    struct timeval t1 = get_wall_time();
+    double secs = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_usec - t0.tv_usec) / 1e6;
+    if (secs < 0) secs = 0;
+    bench_sec_total += secs;
+    char r[16];
+
+    if (mv && mv->from >= 0 && mv->to >= 0 && mv->from < 64 && mv->to < 64 &&
+        mv->from != mv->to) {
+        snprintf(r, sizeof(r), "%s", move_to_string(mv));
+    } else {
+        Move legal[256];
+        int n = generate_legal_moves(pos, legal);
+        snprintf(r, sizeof(r), "%s", n > 0 ? move_to_string(&legal[0]) : "0000");
+    }
+    char w[16];
+    int mate_plies = MATE_SCORE - (result_bb < 0 ? -result_bb : result_bb);
+    if (depth_arg == 0) {
+        snprintf(w, sizeof(w), "%8s", "-");
+    } else if (mate_plies >= 0 && mate_plies < MAX_DEPTH * 2) {
+        char m[12];
+        snprintf(m, sizeof(m), "%sM%d", result_bb < 0 ? "-" : "", (mate_plies + 1) / 2);
+        snprintf(w, sizeof(w), "%8s", m);
+    } else {
+        snprintf(w, sizeof(w), "%5d cp", result_bb);
+    }
+    long long nps = secs > 0 ? (long long)(node_count / secs) : 0;
+
+    if (isatty(STDERR_FILENO)) fputs("\r\033[K", stderr);
+    fprintf(stderr, "Bench #%3d: %-6s %s %3d ply %11.6f sec. %11lld nodes %10lld nps\n",
+            bench_done + 1, r, w, depth_arg, secs, node_count, nps);
+    fflush(stderr);
+}
+
+static void bench_end(void) {
+    long long ms = time_diff_ms(bench_t0, get_wall_time());
+    if (ms < 1) ms = 1;
+    long long node_count = go_depth_nodes_sum - bench_nodes_start;
+    long long nps = node_count * 1000 / ms;
+    bench_active = false;
+    bench_queues_input = false;
+    if (bench_stdout_copy >= 0) {
+        fflush(stdout);
+        dup2(bench_stdout_copy, STDOUT_FILENO);
+        close(bench_stdout_copy);
+        bench_stdout_copy = -1;
+    }
+    printf("info string bench: positions %d nodes %lld time %lld nps %lld\n", BENCH_N, node_count, ms, nps);
+    fflush(stdout);
+    bench_update(BENCH_N);
+
+    fprintf(stderr, "Overall:   %d positions %22.6f sec. %11lld nodes %10lld nps\n",
+            BENCH_N, bench_sec_total, node_count,
+            bench_sec_total > 0 ? (long long)(node_count / bench_sec_total) : 0);
+
+    fprintf(stderr, "\n===========================================================================\n"
+                    "Positions       : %d (depth %d, Hash 128 MB, 1 thread)\n"
+                    "Total time (ms) : %lld\n"
+                    "Nodes searched  : %lld\n"
+                    "Nodes/second    : %lld  (%.2f Mnps)\n"
+                    "===========================================================================\n",
+            BENCH_N, bench_depth, ms, node_count, nps, nps / 1e6);
+    fflush(stderr);
+}
+
 void parse_position(Position* pos, const char* input);
 int parse_depth(const char* input);
 int parse_movetime(const char* input);
@@ -189,6 +498,10 @@ void print_uci_info_multipv(int multipv_idx, int depth, int seldepth, int score,
     if (multipv_idx > 0) snprintf(mpv, sizeof(mpv), " multipv %d", multipv_idx);
     else                 mpv[0] = '\0';
 
+    char tbh[32];
+    if (syzygy_limit > 0) snprintf(tbh, sizeof(tbh), " tbhits %lld", SYZYGY_HITS());
+    else                  tbh[0] = '\0';
+
     long long nps = 0;
     if (time_ms > 0) {
         nps = (nodes * 1000LL) / time_ms;
@@ -200,11 +513,11 @@ void print_uci_info_multipv(int multipv_idx, int depth, int seldepth, int score,
     if (mate_plies >= 0 && mate_plies < MAX_DEPTH * 2) {
         int mate_moves = (mate_plies + 1) / 2;
         if (score < 0) mate_moves = -mate_moves;
-        printf("info depth %d seldepth %d%s score mate %d time %lld nodes %lld nps %lld pv %s\n",
-               depth, seldepth, mpv, mate_moves, time_ms, nodes, nps, pv);
+        printf("info depth %d seldepth %d%s score mate %d time %lld nodes %lld nps %lld%s pv %s\n",
+               depth, seldepth, mpv, mate_moves, time_ms, nodes, nps, tbh, pv);
     } else {
-        printf("info depth %d seldepth %d%s score cp %d time %lld nodes %lld nps %lld pv %s\n",
-               depth, seldepth, mpv, score, time_ms, nodes, nps, pv);
+        printf("info depth %d seldepth %d%s score cp %d time %lld nodes %lld nps %lld%s pv %s\n",
+               depth, seldepth, mpv, score, time_ms, nodes, nps, tbh, pv);
     }
     fflush(stdout);
 }
@@ -304,32 +617,46 @@ static int tm_flexible = 0;
 
 static int tm_hard_ms = 0;
 
+static int tm_set_hard(int go_budget_ms, int my_time) {
+    long long hard_ms = (long long)go_budget_ms * 5 / 2;
+    long long cap_ms  = (long long)(my_time * 0.40f);
+    if (hard_ms > cap_ms)  hard_ms = cap_ms;
+    if (hard_ms < go_budget_ms) hard_ms = go_budget_ms;
+    tm_hard_ms = (int)hard_ms;
+    return go_budget_ms;
+}
+
 int calculate_search_time(int wtime, int btime, int winc, int binc, int movestogo, Color to_move, Position* pos) {
     int my_time = (to_move == WHITE) ? wtime : btime;
     int my_increment = (to_move == WHITE) ? winc : binc;
 
-    if (my_time <= 0) return 100;
+    if (my_time <= 0) return tm_set_hard(100, my_time);
+
+    if (move_overhead_ms > 0) {
+        my_time -= move_overhead_ms;
+        if (my_time < 1) my_time = 1;
+    }
 
     if (movestogo > 0) {
         const int MOVE_OVERHEAD = 30;
         int safe = my_time - MOVE_OVERHEAD;
-        if (safe < 1) return 1;
+        if (safe < 1) return tm_set_hard(1, my_time);
         int n = movestogo > 100 ? 100 : movestogo;
         long long alloc = (long long)safe / n;
         if (my_increment > 0) alloc += ((long long)my_increment * 7) / 10;
         long long cap = ((long long)safe * 4) / 5;
         if (alloc > cap) alloc = cap;
         if (alloc < 1) alloc = 1;
-        return (int)alloc;
+        return tm_set_hard((int)alloc, my_time);
     }
 
     if (my_increment <= 0) {
         const int MOVE_OVERHEAD = 30;
         const int MOVE_HORIZON  = 25;
         int safe = my_time - MOVE_OVERHEAD;
-        if (safe < 1) return 1;
+        if (safe < 1) return tm_set_hard(1, my_time);
         int alloc = safe / MOVE_HORIZON;
-        return alloc < 1 ? 1 : alloc;
+        return tm_set_hard(alloc < 1 ? 1 : alloc, my_time);
     }
 
     float total_time_left = my_time / 1000.0f;
@@ -727,7 +1054,8 @@ static Move search_root_with_aspiration(Position* pos, int depth, int previous_s
 
         delta = 0;
         *window_open = false;
-        if (use_aspiration && depth > 8) {
+
+        if (use_aspiration && depth > 5) {
             delta = ASP_DELTA0 + (previous_score < 0 ? -previous_score : previous_score) / ASP_DIV;
             alpha = previous_score - delta;
             beta  = previous_score + delta;
@@ -817,7 +1145,7 @@ static void report_pv_lines(Position* pos, int depth, Move first_best,
     snprintf(last_completed_pv, sizeof(last_completed_pv), "%s",
              first_pv ? first_pv : "");
     if (multipv_setting <= 1 || first_best.from == first_best.to) {
-        print_uci_info(depth, first_seldepth, first_score, elapsed, *nodes_total, first_pv);
+        print_uci_info(depth, first_seldepth, first_score, elapsed, SMP_NODES(*nodes_total), first_pv);
         report_hashfull();
         return;
     }
@@ -846,6 +1174,8 @@ static void report_pv_lines(Position* pos, int depth, Move first_best,
 
         *nodes_total += mi.nodes;
 
+        if (is_root_excluded(&segment) || !is_root_included(&segment)) break;
+
         pv_lines[count].score    = mi.score;
         pv_lines[count].seldepth = mi.seldepth;
         snprintf(pv_lines[count].pv, sizeof(pv_lines[count].pv), "%s", mi.pv);
@@ -870,7 +1200,7 @@ static void report_pv_lines(Position* pos, int depth, Move first_best,
 
     for (int i = 0; i < count; i++) {
         print_uci_info_multipv(i + 1, depth, pv_lines[i].seldepth, pv_lines[i].score,
-                               elapsed_final, *nodes_total, pv_lines[i].pv);
+                               elapsed_final, SMP_NODES(*nodes_total), pv_lines[i].pv);
     }
 
     report_hashfull();
@@ -1120,7 +1450,7 @@ static void report_missing_go_values(const char* input) {
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
 
     setvbuf(stdin, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -1139,6 +1469,17 @@ int main() {
 
     bool uci_announced = false;
 
+    if (argc > 1 && strcmp(argv[1], "bench") == 0) {
+        snprintf(input, sizeof(input), "bench %s\n", argc > 2 ? argv[2] : "");
+        queue_input(input);
+        bench_from_cmdline = true;
+
+        if (!freopen(NULL_DEVICE, "w", stdout)) return 1;
+    } else if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
+
+        banner(stdout);
+    }
+
     while (read_uci_line(input, sizeof(input))) {
 
         trim_uci_line(input);
@@ -1156,6 +1497,7 @@ int main() {
                 extern void search_new_game(void);
                 search_new_game();
             }
+            smp_new_game();
             position_desync = false; position_desync_reason[0] = '\0';
         } else if (strcmp(input, "uci") == 0) {
 
@@ -1175,6 +1517,12 @@ int main() {
 
             printf("option name Ponder type check default %s\n",
                    ponder_setting ? "true" : "false");
+            printf("option name Move Overhead type spin default 0 min 0 max %d\n", MOVE_OVERHEAD_MAX);
+
+            printf("option name SyzygyPath type string default <empty>\n");
+            printf("option name SyzygyProbeLimit type spin default 7 min 0 max 7\n");
+
+            printf("option name UCI_Chess960 type check default false\n");
             printf("uciok\n");
             fflush(stdout);
             uci_announced = true;
@@ -1195,7 +1543,8 @@ int main() {
             bool opt_ok = parse_setoption(input, opt_name, sizeof(opt_name),
                                                  opt_value, sizeof(opt_value));
             long want_l = 0;
-            if (opt_ok && strcmp(opt_name, "Hash") == 0) {
+
+            if (opt_ok && strcasecmp(opt_name, "Hash") == 0) {
 
                 if (opt_value[0] == '\0') {
                     printf("info string setoption Hash: missing value, option ignored\n");
@@ -1222,7 +1571,7 @@ int main() {
                     }
                     fflush(stdout);
                 }
-            } else if (opt_ok && strcmp(opt_name, "MultiPV") == 0) {
+            } else if (opt_ok && strcasecmp(opt_name, "MultiPV") == 0) {
 
                 if (opt_value[0] == '\0') {
                     printf("info string setoption MultiPV: missing value, option ignored\n");
@@ -1237,14 +1586,14 @@ int main() {
                     printf("info string MultiPV %d\n", multipv_setting);
                 }
                 fflush(stdout);
-            } else if (opt_ok && strcmp(opt_name, "Clear Hash") == 0) {
+            } else if (opt_ok && strcasecmp(opt_name, "Clear Hash") == 0) {
 
                 clear_tt(&main_tt);
                 clear_killers();
                 clear_history();
                 printf("info string Clear Hash: table, killers and history cleared\n");
                 fflush(stdout);
-            } else if (opt_ok && strcmp(opt_name, "Threads") == 0) {
+            } else if (opt_ok && strcasecmp(opt_name, "Threads") == 0) {
 
                 if (opt_value[0] == '\0') {
                     printf("info string setoption Threads: missing value, option ignored\n");
@@ -1256,16 +1605,22 @@ int main() {
                     if (want < THREADS_MIN) want = THREADS_MIN;
                     if (want > THREADS_MAX) want = THREADS_MAX;
                     threads_setting = (int)want;
+                    {
+                        const int alive_threads = smp_set_threads(threads_setting);
+                        if (alive_threads != threads_setting) {
+                            printf("info string Threads %d: created only %d threads\n", threads_setting, alive_threads);
+                            threads_setting = alive_threads;
+                        }
+                    }
                     if (want != want_l) {
-
-                        printf("info string Threads %ld REQUESTED -> %d APPLIED (single-threaded engine, range %d..%d)\n",
+                        printf("info string Threads %ld REQUESTED -> %d APPLIED (range %d..%d)\n",
                                want_l, threads_setting, THREADS_MIN, THREADS_MAX);
                     } else {
                         printf("info string Threads %d\n", threads_setting);
                     }
                 }
                 fflush(stdout);
-            } else if (opt_ok && strcmp(opt_name, "Ponder") == 0) {
+            } else if (opt_ok && strcasecmp(opt_name, "Ponder") == 0) {
 
                 if (opt_value[0] == '\0') {
                     printf("info string setoption Ponder: missing value, option ignored\n");
@@ -1278,6 +1633,48 @@ int main() {
                 } else {
                     printf("info string setoption Ponder: value `%s` is neither "
                            "`true` nor `false`, option ignored\n", opt_value);
+                }
+                fflush(stdout);
+            } else if (opt_ok && strcasecmp(opt_name, "Move Overhead") == 0) {
+
+                if (opt_value[0] == '\0') {
+                    printf("info string setoption Move Overhead: missing value, option ignored\n");
+                } else if (!parse_uci_int(opt_value, &want_l)) {
+                    printf("info string setoption Move Overhead: value `%s` is not a number, option ignored\n",
+                           opt_value);
+                } else {
+                    long want = want_l;
+                    if (want < 0) want = 0;
+                    if (want > MOVE_OVERHEAD_MAX) want = MOVE_OVERHEAD_MAX;
+                    move_overhead_ms = (int)want;
+                    printf("info string Move Overhead %d ms\n", move_overhead_ms);
+                }
+                fflush(stdout);
+            } else if (opt_ok && strcasecmp(opt_name, "UCI_Chess960") == 0) {
+
+                if (strcmp(opt_value, "true") == 0) {
+                    uci_chess960 = true;
+                    printf("info string UCI_Chess960 true\n");
+                } else if (strcmp(opt_value, "false") == 0) {
+                    uci_chess960 = false;
+                    printf("info string UCI_Chess960 false\n");
+                } else {
+                    printf("info string setoption UCI_Chess960: value `%s` is neither "
+                           "`true` nor `false`, option ignored\n", opt_value);
+                }
+                fflush(stdout);
+            } else if (opt_ok && strcasecmp(opt_name, "SyzygyPath") == 0) {
+
+                syzygy_set_path(opt_value);
+                printf("info string SyzygyPath: probing up to %d pieces\n", syzygy_limit);
+                fflush(stdout);
+            } else if (opt_ok && strcasecmp(opt_name, "SyzygyProbeLimit") == 0) {
+                if (opt_value[0] == '\0' || !parse_uci_int(opt_value, &want_l)) {
+                    printf("info string setoption SyzygyProbeLimit: value `%s` is not a number, option ignored\n",
+                           opt_value);
+                } else {
+                    syzygy_set_limit((int)want_l);
+                    printf("info string SyzygyProbeLimit %ld: probing up to %d pieces\n", want_l, syzygy_limit);
                 }
                 fflush(stdout);
             } else if (opt_ok) {
@@ -1397,7 +1794,24 @@ int main() {
             bool ponder_req = go_has_token(input, "ponder");
 
             apply_searchmoves(input, &pos);
+
+            syzygy_hits = 0;
+
+            if (root_included_count == 0 && syzygy_limit > 0) {
+                Move tb_list[MAX_MULTIPV];
+                int tb_wdl = 0;
+                int tb_count = syzygy_root(&pos, tb_list, MAX_MULTIPV, &tb_wdl);
+                if (tb_count > 0) {
+                    for (int i = 0; i < tb_count; i++) root_included[i] = tb_list[i];
+                    root_included_count = tb_count;
+                    printf("info string syzygy root: %s, %d move(s)\n",
+                           tb_wdl > 0 ? "win" : tb_wdl < 0 ? "loss" : "draw", tb_count);
+                    fflush(stdout);
+                }
+            }
             set_node_limit(parse_nodes_ll(input));
+
+            smp_start(&pos, multipv_setting);
 
             if (go_has_token(input, "mate") &&
                 (strstr(input, "infinite") || ponder_req || strstr(input, "movetime") ||
@@ -1509,6 +1923,7 @@ int main() {
                     }
                 }
 
+                smp_halt();
                 emit_bestmove(valid_move_found ? &best_move : NULL, &pos, info.pv);
 
                 set_ponder_mode(false, 0);
@@ -1521,6 +1936,7 @@ int main() {
                 SearchInfo info = {0};
                 tm_flexible = 0;
                 Move best_move = search_with_time_limit(&pos, movetime, &info);
+                smp_halt();
 
                 emit_bestmove(&best_move, &pos, info.pv);
 
@@ -1538,6 +1954,7 @@ int main() {
                 SearchInfo info = {0};
                 tm_flexible = 1;
                 Move best_move = search_with_time_limit(&pos, search_time, &info);
+                smp_halt();
 
                 emit_bestmove(&best_move, &pos, info.pv);
 
@@ -1592,6 +2009,7 @@ int main() {
                                                                     &window_open);
 
                     nodes_total += info.nodes;
+                    go_depth_nodes_sum += info.nodes;
 
                     bool iteration_interrupted = was_root_search_interrupted();
 
@@ -1631,13 +2049,20 @@ int main() {
                     if (stop_requested) break;
                 }
 
+                smp_halt();
+                {
+                    const long long helper_nodes = smp_helper_nodes();
+                    nodes_total          += helper_nodes;
+                    go_depth_nodes_sum  += helper_nodes;
+                }
+
                 long long elapsed = time_diff_ms(search_start, get_wall_time());
                 if (elapsed < 1) elapsed = 1;
 
                 if (nodes_target > 0 && node_limit_hit()) {
                     printf("info string go nodes: budget %lld, searched %lld, "
                            "deepest completed depth %d\n",
-                           nodes_target, get_nodes_searched(), last_completed_depth);
+                           nodes_target, SMP_NODES(get_nodes_searched()), last_completed_depth);
                     fflush(stdout);
                 }
 
@@ -1663,11 +2088,25 @@ int main() {
                     fflush(stdout);
                 }
 
+                if (bench_active)
+                    bench_row(&best_move, &pos, previous_score, last_completed_depth,
+                                 search_start, nodes_total);
+
                 print_safe_bestmove(&best_move, &pos);
             }
 
             drain_search_input();
             if (quit_requested) break;
+
+        } else if (strcmp(input, "bench") == 0 || strncmp(input, "bench ", 6) == 0) {
+            bench_start(input);
+
+        } else if (strncmp(input, "bench_update ", 13) == 0 && bench_active) {
+            bench_update(atoi(input + 13));
+
+        } else if (strcmp(input, "bench_end") == 0 && bench_active) {
+            bench_end();
+            if (bench_from_cmdline) break;
 
         } else if (strncmp(input, "ponderhit", 9) == 0) {
 
@@ -1687,6 +2126,7 @@ int main() {
         }
     }
 
+    smp_shutdown();
     free_tt(&main_tt);
     return 0;
 }

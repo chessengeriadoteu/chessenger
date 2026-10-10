@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND MIT
  * Copyright (C) Dariusz Domagała
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
- * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-10-06.
+ * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-10-10.
  */
 #define RFP_MARGIN 150
 #include "search.h"
@@ -44,9 +44,9 @@ _Static_assert(MAX_MOVES == 256, "Move[256] literals in search.c assume MAX_MOVE
 
 static char pending_input[MAX_UCI_LINE * 2] = "";
 static bool has_pending_input = false;
-static int check_counter = 0;
+static SMP_TLS int check_counter = 0;
 
-static bool root_search_interrupted = false;
+static SMP_TLS bool root_search_interrupted = false;
 
 bool was_root_search_interrupted(void) {
     return root_search_interrupted;
@@ -69,19 +69,19 @@ void set_search_unbounded(bool unbounded) {
     search_unbounded = unbounded;
 }
 
-static int history_table[64][64];
+static SMP_TLS int history_table[64][64];
 
-static Move killer_moves[PV_MAX_PLY][2];
+static SMP_TLS Move killer_moves[PV_MAX_PLY][2];
 
-static Move pv_table[PV_MAX_PLY][PV_MAX_PLY];
-static int pv_length[PV_MAX_PLY];
+static SMP_TLS Move pv_table[PV_MAX_PLY][PV_MAX_PLY];
+static SMP_TLS int pv_length[PV_MAX_PLY];
 
-static int  eval_stack[PV_MAX_PLY];
-static bool eval_stack_valid[PV_MAX_PLY];
+static SMP_TLS int  eval_stack[PV_MAX_PLY];
+static SMP_TLS bool eval_stack_valid[PV_MAX_PLY];
 
-static bool null_move_at[PV_MAX_PLY];
+static SMP_TLS bool null_move_at[PV_MAX_PLY];
 
-static uint16_t se_excluded[PV_MAX_PLY];
+static SMP_TLS uint16_t se_excluded[PV_MAX_PLY];
 
 static const int nullvar_table[] = {13, 43, 149, 519, 1809, 6311, 22027};
 static int null_variance(int delta) {
@@ -96,7 +96,7 @@ static bool ponderhit_received = false;
 
 static bool      node_limit_active = false;
 static long long node_limit = 0;
-static long long nodes_searched = 0;
+static SMP_TLS long long nodes_searched = 0;
 static bool      node_limit_reached = false;
 
 void reset_search_state(void) {
@@ -169,6 +169,23 @@ long long get_nodes_searched(void) {
 
 bool node_limit_hit(void) {
     return node_limit_reached;
+}
+
+int  smp_stop = 0;
+SMP_TLS bool       smp_helper  = false;
+SMP_TLS long long* smp_nodes_pub = NULL;
+
+void smp_helper_new_go(void) {
+    nodes_searched = 0;
+    check_counter  = 0;
+    root_search_interrupted = false;
+    new_search_reset();
+}
+
+static bool smp_helper_stop(void) {
+    if ((++check_counter & 1023) == 0 && smp_nodes_pub)
+        __atomic_store_n(smp_nodes_pub, nodes_searched, __ATOMIC_RELAXED);
+    return smp_stop_read();
 }
 
 void set_search_time_limit(long long time_limit_ms) {
@@ -1082,11 +1099,23 @@ void set_ponder_mode(bool on, long long budget_ms) {
 bool is_ponder_mode(void) { return ponder_mode; }
 bool ponderhit_seen(void) { return ponderhit_received; }
 
+bool bench_queues_input = false;
+
 static void handle_line_during_search(char* line, bool* abort_now) {
     while (*line == ' ' || *line == '\t' || *line == '\r') line++;
     size_t len = strlen(line);
     while (len > 0 && (line[len-1] == ' ' || line[len-1] == '\r')) line[--len] = '\0';
     if (len == 0) return;
+
+    if (bench_queues_input) {
+
+        if (!queue_pending_line(line) && strncmp(line, "quit", 4) == 0) {
+            stop_requested = true;
+            *abort_now = true;
+            quit_requested = true;
+        }
+        return;
+    }
 
     if (strncmp(line, "isready", 7) == 0) {
 
@@ -1204,8 +1233,9 @@ static size_t drop_nul_lines(char* buf, size_t len, size_t* dropped) {
 }
 
 bool fast_check_stop(void) {
+    if (smp_helper) return smp_helper_stop();
 
-    if (node_limit_active && nodes_searched >= node_limit) {
+    if (node_limit_active && SMP_NODES(nodes_searched) >= node_limit) {
         node_limit_reached = true;
         stop_requested = true;
         return true;
@@ -1262,6 +1292,7 @@ bool fast_check_stop(void) {
 #endif
     }
 
+    if (abort_now || stop_requested) __atomic_store_n(&smp_stop, 1, __ATOMIC_RELAXED);
     return abort_now || stop_requested;
 }
 

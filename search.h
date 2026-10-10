@@ -5,6 +5,7 @@
 #define SEARCH_H
 
 #include "board.h"
+#include "smp.h"
 #include "utils.h"
 #include <stdbool.h>
 #include <sys/time.h>
@@ -62,6 +63,7 @@ bool gives_check(Position* pos, Move* move);
 extern bool stop_requested;
 extern bool position_changed;
 extern bool quit_requested;
+extern bool bench_queues_input;
 
 bool get_pending_input(char* buffer, int buffer_size);
 bool take_partial_input(char* buffer, int buffer_size);

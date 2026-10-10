@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) Dariusz Domagała
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
- * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-06.
+ * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-10.
  * KPK bitbase adapted from Stash 37, whose KPK bitbase follows Stockfish's bitbase.cpp.
  */
 #include "eval.h"
@@ -462,7 +462,7 @@ static Bitboard attacked_squares_of(Position* pos, Color color) {
     return map;
 }
 
-int hung_penalty_stm = 0;
+SMP_TLS int hung_penalty_stm = 0;
 
 static int evaluate_hung_pieces_m(Position* pos, const AttackMaps* maps) {
     hung_penalty_stm = 0;
@@ -624,6 +624,10 @@ static void build_pawn_masks(void) {
         passed_span_mask[BLACK][sq] = files_bb & ahead_black;
     }
     pawn_masks_ready = true;
+}
+
+void smp_init_shared_eval(void) {
+    if (!pawn_masks_ready) build_pawn_masks();
 }
 
 static inline Bitboard pawn_set_attacks(Bitboard pawns_bb, Color side_c) {
@@ -793,8 +797,9 @@ typedef struct {
     Bitboard pawn_reach[2];
     int32_t extra_mg, extra_eg;
 } PawnHashEntry;
-static PawnHashEntry pawn_hash[1u << PAWN_HASH_BITS];
-static int pawn_hash_ready = 0;
+
+static SMP_TLS PawnHashEntry pawn_hash[1u << PAWN_HASH_BITS];
+static SMP_TLS int pawn_hash_ready = 0;
 
 static inline uint32_t pawn_hash_index(Bitboard wp, Bitboard bp, int kb, int kc) {
     uint64_t h = wp ^ (bp * 0x9E3779B97F4A7C15ULL)
@@ -1423,14 +1428,14 @@ static int eval_kbnk(const Position* pos, Color strong) {
 static int eval_krkp(const Position* pos, Color strong) {
     const Color weak = (strong == WHITE) ? BLACK : WHITE;
     const int k_strong = KING_SQ(strong), k_weak = KING_SQ(weak);
-    const int rook_sq = get_lsb(pos->pieces[strong][ROOK]), pawn_bit = get_lsb(pos->pieces[weak][PAWN]);
+    const int rook_sq_idx = get_lsb(pos->pieces[strong][ROOK]), pawn_bit = get_lsb(pos->pieces[weak][PAWN]);
     const int push_sq = pawn_bit + (weak == WHITE ? 8 : -8);
     const int promo_sq = (pawn_bit & 7) + (weak == WHITE ? 56 : 0);
     const int strong_to_move = pos->to_move == strong;
     int w;
     if (pawn_path(k_strong, strong) & (1ULL << pawn_bit))
         w = MATERIAL_VALUE(ROOK) - square_distance(k_strong, pawn_bit);
-    else if (square_distance(k_weak, pawn_bit) >= 3 + !strong_to_move && square_distance(k_weak, rook_sq) >= 3)
+    else if (square_distance(k_weak, pawn_bit) >= 3 + !strong_to_move && square_distance(k_weak, rook_sq_idx) >= 3)
         w = MATERIAL_VALUE(ROOK) - square_distance(k_strong, pawn_bit);
     else if (rank_relative_to(k_weak, strong) <= 2 && square_distance(k_weak, pawn_bit) == 1
              && rank_relative_to(k_strong, strong) >= 3 && square_distance(k_strong, pawn_bit) >= 3 + strong_to_move)
@@ -1758,15 +1763,15 @@ static void debug_material_loss(void) {
            eval_after, eval_before, eval_after - eval_before);
 
     if (abs(material_after - material_before + KNIGHT_VALUE) < 10) {
-        printf("   ✅ MATERIAL COUNTING: Working correctly\n");
+        printf("   [OK] MATERIAL COUNTING: Working correctly\n");
     } else {
-        printf("   ❌ MATERIAL COUNTING: BUG DETECTED!\n");
+        printf("   [X] MATERIAL COUNTING: BUG DETECTED!\n");
     }
 
     if (abs(eval_after - eval_before + KNIGHT_VALUE) < 50) {
-        printf("   ✅ OVERALL EVALUATION: Shows material loss\n");
+        printf("   [OK] OVERALL EVALUATION: Shows material loss\n");
     } else {
-        printf("   ❌ OVERALL EVALUATION: Compensation bug detected!\n");
+        printf("   [X] OVERALL EVALUATION: Compensation bug detected!\n");
         printf("   Other components are compensating for material loss\n");
     }
 

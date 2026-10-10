@@ -40,6 +40,8 @@ bool has_castled(Position* pos, Color color) {
     int king_square = get_king_square(pos, color);
     if (king_square == -1) return false;
 
+    if (uci_chess960 && (pos->castling_rights & ((color == WHITE) ? 0x03 : 0x0C))) return false;
+
     if (color == WHITE) {
 
         return (king_square == 6 || king_square == 2);

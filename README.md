@@ -1,11 +1,11 @@
-# Chessenger 1.6
+# Chessenger 2.0
 
 Chessenger is a UCI chess engine in C99, written by AI coding assistants under the direction of Dariusz Domagała
 (see [How Chessenger is made](#how-chessenger-is-made)).
 
-- Version: 1.6 (code date 2026-10-06)
-- Strength: 3146.12 [3130.90, 3161.70] (runs A190 and A191: 1500 games, Ordo anchored to MCERL ratings)
-- What is new: Search, king safety, endgame rules with a KPK bitbase and time management adapted from Stash 37; transposition table modelled on it; evaluation weights and piece values retuned; versions 1.1 to 1.5 were not published.
+- Version: 2.0 (code date 2026-10-10)
+- Strength: 3216.96 [3203.05, 3230.90] (runs A217 and A218: 1536 games, Ordo anchored to MCERL ratings)
+- What is new: Multi-threaded search (Lazy SMP, `Threads` up to 64); Syzygy endgame tablebases through Fathom; Chess960; `Move Overhead` option; `bench` command; bad captures searched after quiet moves and SEE-based futility pruning in quiescence search; fail-soft search with reworked transposition table replacement and aspiration windows; versions 1.7 to 1.9 were not published.
 
 ## How Chessenger is made
 
@@ -35,9 +35,9 @@ README says how the figure was obtained. The author is responsible for the code 
 
 ## All versions
 
-Every version is a tagged commit in this repository (`v0.1` … `v1.6`); from 0.2 on its GitHub Release carries the binaries.
+Every version is a tagged commit in this repository (`v0.1` … `v2.0`); from 0.2 on its GitHub Release carries the binaries.
 Version numbers follow playing strength, not dates: 0.6 and 0.7 were skipped on purpose,
-1.1 to 1.5 were not published, and 2.0 will be the first version with a neural network.
+1.1 to 1.5 and 1.7 to 1.9 were not published, and 3.0 will be the first version with a neural network.
 
 | Version | Code date | Strength (CElo, MCERL scale) | Notes |
 |---|---|---|---|
@@ -50,6 +50,7 @@ Version numbers follow playing strength, not dates: 0.6 and 0.7 were skipped on 
 | 0.9 | 2026-09-21 | 2932.38 [2919.52, 2945.24] (run A143: 2000 games, Ordo anchored to MCERL ratings; earlier run A142: 2921.39) | Evaluation weights partly based on 4ku 5.1; tuned search and time management. |
 | 1.0 | 2026-10-05 | 3052.07 [3037.27, 3066.92] (runs A166 and A167: 1500 games, Ordo anchored to MCERL ratings) | Late move reductions, continuation history, singular extensions, ProbCut, king safety and time management adapted from Stash 37; transposition table modelled on it; rooks score open files; pawn hash table; search depth up to 128 plies. |
 | 1.6 | 2026-10-06 | 3146.12 [3130.90, 3161.70] (runs A190 and A191: 1500 games, Ordo anchored to MCERL ratings) | Search, king safety, endgame rules with a KPK bitbase and time management adapted from Stash 37; transposition table modelled on it; evaluation weights and piece values retuned; versions 1.1 to 1.5 were not published. |
+| 2.0 | 2026-10-10 | 3216.96 [3203.05, 3230.90] (runs A217 and A218: 1536 games, Ordo anchored to MCERL ratings) | Multi-threaded search (Lazy SMP, `Threads` up to 64); Syzygy endgame tablebases through Fathom; Chess960; `Move Overhead` option; `bench` command; bad captures searched after quiet moves and SEE-based futility pruning in quiescence search; fail-soft search with reworked transposition table replacement and aspiration windows; versions 1.7 to 1.9 were not published. |
 
 ## Lineage
 
@@ -64,7 +65,7 @@ which the author maintains. Chessenger played with one thread. A rating is the o
 Elo difference measured in the games, and it belongs to the measured binary. MCERL ratings are not directly
 comparable with other rating lists such as CCRL or CEGT.
 
-1500 games against ten engines from MCERL (Komodo CCT, Senpai, Rice, Rodent, Polaris, Counter, Crafty, Patricia, OliThink, Toga), at 2 s + 0.2 s per move, Hash 128 MB: 760 games on a Mac mini M4 Pro and 740 on a MacBook Pro M1 Pro, rated together with Ordo anchored to their MCERL ratings.
+1536 games against twelve engines from MCERL (Princhess 0.18.0, Texel 1.09, Svart 6, Stockfish 4.5 DD, Marvin 6.1.0, Deep Shredder 13, Cheng 4.44, Komodo CCT, Stockfish 3, Senpai 2.0, Senpai 1.0, Rice 5.0.0), at 2 s + 0.2 s per move, Hash 128 MB: 768 games on a Mac mini M4 Pro and 768 on a MacBook Pro M1 Pro, rated together with Ordo anchored to their MCERL ratings. Strength with more than one thread was not measured.
 
 ## About the source
 
@@ -78,32 +79,36 @@ same moves on those 24 positions as the measured binary.
 ## Build
 
 ```
-make            # this machine
-make release    # all binaries into dist/ (Linux and Windows need zig)
+make              # this machine
+make release      # all binaries except 32-bit Windows into dist/ (Linux and Windows need zig)
+make release-x32  # 32-bit Windows binary into dist/ (needs zig)
 ```
 
 ## Binaries
 
 | File | For |
 |---|---|
-| `chessenger-1.6-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
-| `chessenger-1.6-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
-| `chessenger-1.6-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
-| `chessenger-1.6-linux-arm64.tar.gz` | Linux, ARM64 (static) |
-| `chessenger-1.6-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
-| `chessenger-1.6-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
-| `chessenger-1.6-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
-| `chessenger-1.6-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
-| `chessenger-1.6-windows-arm64.zip` | Windows on ARM (ARM64) |
+| `chessenger-2.0-macos-arm64.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer |
+| `chessenger-2.0-macos-x64.tar.gz` | Mac with Intel CPU, macOS 10.9 or newer |
+| `chessenger-2.0-linux-x64.tar.gz` | Linux, x86-64 (static, x86-64-v2: SSE4.2 and POPCNT) |
+| `chessenger-2.0-linux-arm64.tar.gz` | Linux, ARM64 (static) |
+| `chessenger-2.0-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
+| `chessenger-2.0-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
+| `chessenger-2.0-windows-x64-popcnt.zip` | Windows, older CPUs with POPCNT (x86-64-v2) |
+| `chessenger-2.0-windows-x64.zip` | Windows, any x86-64 CPU (baseline, slowest) |
+| `chessenger-2.0-windows-x32.zip` | Windows, 32-bit (i686): old PCs and 32-bit Windows |
+| `chessenger-2.0-windows-arm64.zip` | Windows on ARM (ARM64) |
 
 Each archive holds the binary, `LICENSE`, `README.md` and, where the version has one, `LICENSES/`.
 
 If unsure on Windows, take `avx2`; on Windows on ARM, take `arm64`.
+The Windows x86 binaries (x64 and x32) were built with clang from llvm-mingw, with LTO and profile-guided optimisation
+(training run on `bench`); `make release` and `make release-x32` build them with zig, without either. Both search the same nodes; only speed differs.
 
 ## UCI
 
 Use Chessenger with a UCI chess GUI or from the command line.
-The engine reports itself as `id name Chessenger 1.6`.
+The engine reports itself as `id name Chessenger 2.0`.
 
 ### Commands
 
@@ -128,6 +133,7 @@ Commands outside the UCI protocol, for testing:
 | `d` | Prints the current position (FEN, side to move, castling, en passant) |
 | `eval` | Prints the static evaluation of the current position |
 | `hash` | Prints the hash key of the current position |
+| `bench [depth]` | Searches the built-in test positions to the given depth (default 15) and prints positions, nodes, time and nodes per second; `chessenger bench [depth]` does the same from the command line |
 
 `debug` and `register` are not supported. After `uci`, any command the engine does not know is answered with `info string <command>: command NOT SUPPORTED`.
 
@@ -138,8 +144,12 @@ Commands outside the UCI protocol, for testing:
 | `Hash` | spin | 64 | 1-1024 | Transposition table size in MB |
 | `MultiPV` | spin | 1 | 1-218 | Number of best lines reported |
 | `Clear Hash` | button | | | Clears the transposition table, killer moves and history |
-| `Threads` | spin | 1 | 1-1 | The engine is single-threaded |
+| `Threads` | spin | 1 | 1-64 | Number of search threads (Lazy SMP) |
 | `Ponder` | check | false | | Thinking on the opponent's time (`go ponder`, `ponderhit`) |
+| `Move Overhead` | spin | 0 | 0-5000 | Milliseconds taken off the remaining clock time before the engine plans each move (GUI and network delays) |
+| `SyzygyPath` | string | `<empty>` | | Folder with Syzygy tablebase files; several folders separated by `:` (`;` on Windows) |
+| `SyzygyProbeLimit` | spin | 7 | 0-7 | Largest number of pieces for which the tablebases are probed |
+| `UCI_Chess960` | check | false | | Chess960 (Fischer Random): castling is sent as the king capturing its own rook |
 
 ## Thanks
 
@@ -148,6 +158,7 @@ Commands outside the UCI protocol, for testing:
 - kz04px, for 4ku, which some of our evaluation weights are based on.
 - Morgan Houppin, for Stash 37, which much of our search, king safety, endgame code (including the KPK bitbase) and time management is adapted from.
 - The Stockfish developers, for Stockfish: the KPK bitbase in Stash 37, which ours is adapted from, follows the one in Stockfish's `bitbase.cpp`.
+- Ronald de Man, basil00 and Jon Dart, for Fathom, the Syzygy tablebase probing code in `fathom/` (MIT license, see `fathom/LICENSE`).
 - Tomasz Michniewski, for the Simplified Evaluation Function on the Chess Programming Wiki, whose piece-square tables our `eval_data.h` is based on.
 - The Chess Programming Wiki and its authors.
 
@@ -156,6 +167,7 @@ Commands outside the UCI protocol, for testing:
 GPL-3.0-or-later, see `LICENSE`.
 Code adapted from OliThink 5.10.5 is also under its MIT license, see `LICENSES/OLITHINK-MIT.txt`.
 Evaluation weights based on 4ku 5.1 are under its MIT license, see `LICENSES/4KU-MIT.txt`.
+Fathom, in `fathom/`, is under its MIT license, see `fathom/LICENSE` (the same text is in `LICENSES/FATHOM-MIT.txt`).
 
 Chessenger is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
 License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any

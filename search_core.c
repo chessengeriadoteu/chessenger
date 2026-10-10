@@ -2,8 +2,9 @@
  * Copyright (C) Dariusz Domagała
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
- * Portions of this file are adapted from OliThink 5.10.5 and Stash 37. Modified by Dariusz Domagała, 2026-10-06.
+ * Portions of this file are adapted from OliThink 5.10.5 and Stash 37. Modified by Dariusz Domagała, 2026-10-10.
  */
+#include "syzygy.h"
 #include "search.h"
 #include "board.h"
 #include "movegen.h"
@@ -12,6 +13,7 @@
 #include "tt.h"
 #include "pawn_structure.h"
 #include <string.h>
+#include <strings.h>
 #include <stdbool.h>
 #include "tune.h"
 
@@ -21,7 +23,12 @@ typedef char history_capacity_check[(HISTORY_GAME_LIMIT + 1 + MAX_SEARCH_PLY + 1
 #define QS_DELTA_BETA 125
 #define QS_DELTA_ALPHA 85
 
-enum { STAGE_HASH, STAGE_CAPTURES, STAGE_QUIETS, STAGE_END };
+#define QS_FUT_MARGIN 200
+#define BAD_CAPTURES_MAX 32
+
+#define TB_WIN_ZONE (SYZYGY_WIN_SCORE - 1000)
+
+enum { STAGE_HASH, STAGE_CAPTURES, STAGE_QUIETS, STAGE_BAD_CAPTURES, STAGE_END };
 enum { NO_MOVE_YET, SOME_MOVE_SEARCHED, ALPHA_RAISED };
 
 static const int piece_value_cp[7] = { 100, 500, 290, 310, 980, 0, 0 };
@@ -35,25 +42,28 @@ static const int piece_value_units[7] = {   0,   5,   2,   3,   9, 0, 0 };
 #define DOUBLE_EXT_MARGIN 16
 #define TRIPLE_EXT_MARGIN 96
 #define DOUBLE_EXT_LIMIT 8
+
 #  define QUIET_FLOOR_MARK(q) ((void)0)
 #define PROBCUT_MARGIN 152
 #define PROBCUT_D 6
 
-static int  quiet_history[65536];
-static Move killer_table[MAX_SEARCH_PLY];
+static SMP_TLS int  quiet_history[65536];
+static SMP_TLS Move killer_table[MAX_SEARCH_PLY];
 
 #define CAPTURE_PICK_ARG
 #define CAPTURE_PICK_PASS
-static Move pv_triangle[MAX_SEARCH_PLY + 1][MAX_SEARCH_PLY + 1];
-static int  eval_stack_ply[MAX_SEARCH_PLY + 1];
-static int  null_at_ply[MAX_SEARCH_PLY + 2];
+static SMP_TLS Move pv_triangle[MAX_SEARCH_PLY + 1][MAX_SEARCH_PLY + 1];
+static SMP_TLS int  eval_stack_ply[MAX_SEARCH_PLY + 1];
+static SMP_TLS int  null_at_ply[MAX_SEARCH_PLY + 2];
 
-static int  cont_hist[2][2][6][64][6][64];
-static Move move_stack[MAX_SEARCH_PLY + 2];
-static int  double_ext_total[MAX_SEARCH_PLY + 2];
+static SMP_TLS int  cont_hist[2][2][6][64][6][64];
+static SMP_TLS Move move_stack[MAX_SEARCH_PLY + 2];
+static SMP_TLS int  double_ext_total[MAX_SEARCH_PLY + 2];
 
-static long long* node_counter_ptr    = NULL;
-static bool*      root_interrupted_ptr = NULL;
+static SMP_TLS long long* node_counter_ptr    = NULL;
+static SMP_TLS bool*      root_interrupted_ptr = NULL;
+
+#define S2_STOP (smp_helper ? smp_stop_read() : (stop_requested || position_changed))
 
 static Move empty_move(void) {
     Move m = {0};
@@ -69,8 +79,8 @@ static bool same_move(Move a, Move b) {
 
 #define IS_KILLER_OR_COUNTER(m, ply) (same_move((m), killer_table[(ply)]))
 
-static Move counter_table[2][6][64];
-static Move counter_at_ply[MAX_SEARCH_PLY + 2];
+static SMP_TLS Move counter_table[2][6][64];
+static SMP_TLS Move counter_at_ply[MAX_SEARCH_PLY + 2];
 static Move* counter_slot(int ply, Color us) {
     Move p;
     if (ply < 1 || null_at_ply[ply - 1]) return NULL;
@@ -173,7 +183,7 @@ static void cont_hist_update(int ply, Color us, Move m, int b) {
         if ((w = cont_hist_row(ply, cont_plies[k], us))) w[ix] += b - w[ix] * ab / 512;
 }
 
-static int nmp_verify_ply = 0;
+static SMP_TLS int nmp_verify_ply = 0;
 
 static Bitboard pinned_for_stm(const Position* pos) {
     Color    us   = pos->to_move;
@@ -268,7 +278,7 @@ static void lmr_init(void) {
 static int quiet_history_score(Color us, Move m, int ply) {
     return quiet_history[history_index(us, m)] / 2 + cont_hist_sum(ply, us, m, 0);
 }
-static int root_depth = 1;
+static SMP_TLS int root_depth = 1;
 
 static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int beta,
                      int null_ok, const Move* excl, SearchInfo* info CUTNODE_ARG);
@@ -284,10 +294,11 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
     Move mlist[MAX_MOVES];
 
     LegalityBuffer qs_legal_ctx; int qs_legal_ready = 0;
+    int  qs_base_score = 0, qs_have_base = 0;
 
     if (info->seldepth < ply) info->seldepth = ply;
     if (fast_check_stop()) return alpha;
-    if (stop_requested || position_changed) return alpha;
+    if (S2_STOP) return alpha;
 
     if (ply >= MAX_SEARCH_PLY) return FIFTY_MOVE_SCALE(pos, evaluate_position(pos));
 
@@ -296,8 +307,9 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
     if (beta - alpha == 1) {
         if (q_tt_found && qts.result_bb) {
             const int qf = qts.flag, qs = qts.score;
-            if ((qf == HASH_BETA  || qf == HASH_EXACT) && qs >= beta)  return beta;
-            if ((qf == HASH_ALPHA || qf == HASH_EXACT) && qs <= alpha) return alpha;
+
+            if ((qf == HASH_BETA  || qf == HASH_EXACT) && qs >= beta)  return qs;
+            if ((qf == HASH_ALPHA || qf == HASH_EXACT) && qs <= alpha) return qs;
         }
     }
 
@@ -320,8 +332,9 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
             best = evaluate_position(pos);
             tt_store_eval(&main_tt, pos->hash, best);
         }
+        qs_base_score = best; qs_have_base = 1;
         if (best > alpha) {
-            if (best >= beta) return beta;
+            if (best >= beta) return best;
             alpha = best;
         }
     } while (0);
@@ -334,9 +347,13 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
         UndoInfo u;
         int      w;
 
-        if (!ch && m.promotion == EMPTY
-                && piece_value_cp[m.piece] > piece_value_cp[m.captured]
-                && static_exchange_evaluation(pos, &m) < 0) continue;
+        if (!ch && m.promotion == EMPTY) {
+            const int qf = qs_have_base && qs_base_score + QS_FUT_MARGIN <= alpha;
+            if (qf || piece_value_cp[m.piece] > piece_value_cp[m.captured]) {
+                const int s = static_exchange_evaluation(pos, &m);
+                if (s < 0 || (qf && s <= 0)) continue;
+            }
+        }
 
         if (!ch) {
             if (!qs_legal_ready) { legality_context_init_pub(pos, &qs_legal_ctx); qs_legal_ready = 1; }
@@ -351,13 +368,14 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
 
         undo_move_full(pos, &m, &u);
 
-        if (stop_requested || position_changed) return alpha;
+        if (S2_STOP) return alpha;
 
         if (w > best) {
             if ((best = w) > alpha) {
                 if ((alpha = w) >= beta) {
-                    qs_tt_store(pos, beta, HASH_BETA, ply);
-                    return beta;
+
+                    qs_tt_store(pos, w, HASH_BETA, ply);
+                    return w;
                 }
             }
         }
@@ -372,11 +390,14 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
     int  i, j, n, nall, nnoisy, first, hist_max, n_quiets, improving_flag, eval_adj;
     int  mc = 0;
     int  tt_noisy = 0;
+    Move bad_captures[BAD_CAPTURES_MAX];
+    int  bad_captures_see[BAD_CAPTURES_MAX], bad_count = 0;
     int  pvnode = beta > alpha + 1;
     int  eval_raw = 0;
     int  skip_quiets = 0;
 
     int  w = -MATE_SCORE;
+    int  tb_max = MATE_SCORE;
     Color us = pos->to_move;
     int  tt_d = 0, tt_flag = 0, tt_s = 0;
     bool tt_hit;
@@ -384,6 +405,8 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
     TTProbe tt_so;
     Move tt_pv_move, mlist[MAX_MOVES], quiets[MAX_MOVES];
     HashFlag flag;
+
+    int  fs_best = -MATE_SCORE - 1, fs_alpha0 = alpha, fs_beta0 = beta;
 
     if (ply) pv_triangle[ply][ply] = empty_move();
 
@@ -394,7 +417,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
         if (ply == 0 && root_interrupted_ptr) *root_interrupted_ptr = true;
         return alpha;
     }
-    if (stop_requested || position_changed) {
+    if (S2_STOP) {
         if (ply == 0 && root_interrupted_ptr) *root_interrupted_ptr = true;
         return alpha;
     }
@@ -427,9 +450,30 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
     if (tt_hit) { tt_d = tt_so.depth; tt_flag = tt_so.flag; tt_s = tt_so.score; }
 
     if (tt_hit && !excl && ply > 0 && tt_d >= d) {
-        if ((tt_flag == HASH_BETA  || tt_flag == HASH_EXACT) && tt_s >= beta) return beta;
-        if ((tt_flag == HASH_ALPHA || tt_flag == HASH_EXACT) && tt_s <= alpha) return alpha;
+
+        if ((tt_flag == HASH_BETA  || tt_flag == HASH_EXACT) && tt_s >= beta) return tt_s;
+        if ((tt_flag == HASH_ALPHA || tt_flag == HASH_EXACT) && tt_s <= alpha) return tt_s;
     }
+
+    if (ply && !excl && syzygy_limit > 0) {
+        int tb_wdl;
+        if (syzygy_probe_wdl(pos, &tb_wdl)) {
+            int tb_s = tb_wdl > 0 ? SYZYGY_WIN_SCORE - ply : tb_wdl < 0 ? -SYZYGY_WIN_SCORE + ply : 0;
+            HashFlag tb_f = tb_wdl > 0 ? HASH_BETA : tb_wdl < 0 ? HASH_ALPHA : HASH_EXACT;
+            if (tb_f == HASH_EXACT || (tb_f == HASH_BETA ? tb_s >= beta : tb_s <= alpha)) {
+                store_hash(&main_tt, pos->hash, d + 6 < MAX_DEPTH ? d + 6 : MAX_DEPTH, tb_s, tb_f, empty_move(), ply);
+                return tb_s >= beta ? beta : tb_s <= alpha ? alpha : tb_s;
+            }
+
+            if (pvnode) {
+
+                if (tb_f == HASH_BETA) { if (tb_s > alpha) alpha = fs_best = tb_s; }
+                else tb_max = tb_s;
+            }
+        }
+    }
+    fs_alpha0 = alpha;
+    fs_beta0 = beta;
     if (!excl && is_no_move(tt_pv_move)) {
 
         if (tt_found && tt_so.mv) tt_pv_move = unpack_move(tt_so.mv);
@@ -452,7 +496,9 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
     if (!ch && !pvnode && beta > -MATE_SCORE + 500) {
 
         if (d == 1 && eval_raw + RAZOR_MARGIN_CORE <= alpha) return qsearch(pos, false, ply, alpha, beta, info);
-        if (d <= RFP_D && eval_adj - RFP_MULT * d > beta) return eval_adj;
+
+        if (d <= RFP_D && eval_adj - RFP_MULT * d > beta)
+            return eval_adj < TB_WIN_ZONE ? eval_adj - RFP_MULT * d : beta;
     }
 
     null_ok = null_ok && !ch && !pvnode && !excl && ply >= nmp_verify_ply && beta > -MATE_SCORE + 500
@@ -481,12 +527,13 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
         pos->en_passant_square = org_ep;
         pos->hash = org_hash;
 
-        if (!(stop_requested || position_changed) && w >= beta) {
-            if (nmp_verify_ply || (d <= 12 && beta < MATE_SCORE - 500)) return beta;
+        if (!(S2_STOP) && w >= beta) {
+
+            if (nmp_verify_ply || (d <= 12 && beta < MATE_SCORE - 500)) return w < TB_WIN_ZONE ? w : beta;
             nmp_verify_ply = ply + (d - R) * 3 / 4;
             w = search_node(pos, false, d - R, ply, beta - 1, beta, 0, NULL, info CUTNODE_PASS(0));
             nmp_verify_ply = 0;
-            if (stop_requested || position_changed) return alpha;
+            if (S2_STOP) return alpha;
             if (w >= beta) return beta;
         }
     }
@@ -511,10 +558,10 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
                 if (pw >= pcb)
                     pw = -search_node(pos, pch, d - 4, ply + 1, -pcb, -pcb + 1, 1, NULL, info CUTNODE_PASS(!cut));
                 undo_move_full(pos, &pm, &pu);
-                if (stop_requested || position_changed) return alpha;
+                if (S2_STOP) return alpha;
                 if (pw >= pcb) {
                     store_hash(&main_tt, pos->hash, d - 3, pw, HASH_BETA, pm, ply);
-                    return beta;
+                    return pw;
                 }
             }
         }
@@ -560,7 +607,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
     }
     tt_noisy = !is_no_move(tt_pv_move) && (tt_pv_move.captured != EMPTY || tt_pv_move.promotion != EMPTY);
 
-    for (n = STAGE_HASH; n <= (ch ? STAGE_CAPTURES : STAGE_QUIETS); n++) {
+    for (n = STAGE_HASH; n <= (ch ? STAGE_CAPTURES : STAGE_BAD_CAPTURES); n++) {
         int nd = d - 1;
         int lo, hi;
         int se = 0, sing = 0;
@@ -577,19 +624,19 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
                 if (search_node(pos, ch, d / 2 + 1, ply, sb - 1, sb, 0, &tt_pv_move, info CUTNODE_PASS(cut)) < sb) {
                     se = 1;
 
-                    if (!pvnode && double_ext_total[ply] < DOUBLE_EXT_LIMIT && !(stop_requested || position_changed)) {
+                    if (!pvnode && double_ext_total[ply] < DOUBLE_EXT_LIMIT && !(S2_STOP)) {
                         int sb2 = sb - DOUBLE_EXT_MARGIN;
                         if (search_node(pos, ch, d / 2 + 1, ply, sb2 - 1, sb2, 0, &tt_pv_move, info CUTNODE_PASS(cut)) < sb2) {
                             int sb3 = sb - TRIPLE_EXT_MARGIN;
                             se = 2;
                             if (tt_pv_move.captured == EMPTY && tt_pv_move.promotion == EMPTY
-                                    && !(stop_requested || position_changed)
+                                    && !(S2_STOP)
                                     && search_node(pos, ch, d / 2 + 1, ply, sb3 - 1, sb3, 0, &tt_pv_move, info CUTNODE_PASS(cut)) < sb3)
                                 se = 3;
                         }
                     }
                 } else if (sb >= beta) {
-                    if (stop_requested || position_changed) return alpha;
+                    if (S2_STOP) return alpha;
                     return beta;
                 } else if (tt_s >= beta)
                     se = -1;
@@ -597,6 +644,8 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
             }
         } else if (n == STAGE_CAPTURES) {
             lo = 0;      hi = nnoisy;
+        } else if (n == STAGE_BAD_CAPTURES) {
+            lo = 0;      hi = bad_count;
         } else {
             lo = nnoisy; hi = nall;
         }
@@ -607,13 +656,21 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
             int      quiet, ext = 0, see = 0, is_first_pv;
             int      escapes = 0;
             int      lmr;
+            int      see_ready = 0;
             bool     gives_check_now;
 
             if      (n == STAGE_HASH)  m = tt_pv_move;
             else if (n == STAGE_CAPTURES) m = pick_capture(mlist, nnoisy, i CAPTURE_PICK_PASS);
+            else if (n == STAGE_BAD_CAPTURES)   { m = bad_captures[i]; see = bad_captures_see[i]; see_ready = 1; }
             else                    m = pick_quiet(mlist, nall, i, ply, us);
 
             if ((n != STAGE_HASH && same_move(m, tt_pv_move)) || (excl && same_move(m, *excl))) continue;
+
+            if (n == STAGE_CAPTURES && !ch && m.promotion == EMPTY && piece_value_cp[m.piece] > piece_value_cp[m.captured]) {
+                see = static_exchange_evaluation(pos, &m);
+                see_ready = 1;
+                if (see < 0 && bad_count < BAD_CAPTURES_MAX) { bad_captures[bad_count] = m; bad_captures_see[bad_count++] = see; continue; }
+            }
 
             if (!ch && !is_legal_fast_pub(pos, &m, &legal_buf)) continue;
 
@@ -622,14 +679,14 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
             if (ply == 0 && (is_root_excluded(&m) || !is_root_included(&m))) continue;
             mc++;
 
-            if (skip_quiets && quiet) { QUIET_FLOOR_MARK(1); n = STAGE_END; break; }
+            if (skip_quiets && quiet) { QUIET_FLOOR_MARK(1); n = STAGE_QUIETS; break; }
             if (ply > 0 && !ch && first != NO_MOVE_YET && alpha > -MATE_SCORE + 500 && d <= LMP_D
                     && mc >= (improving_flag ? (LMP_I_A + LMP_I_B * d * d) / 16 : (LMP_N_A + LMP_N_B * d * d) / 16)) skip_quiets = 1;
 
             if (ply > 0 && first != NO_MOVE_YET && alpha > -MATE_SCORE + 500 && quiet && d <= 4
                     && cont_hist_sum(ply, us, m, 1) < CHP_A - CHP_B * (d - 1)) { QUIET_FLOOR_MARK(1); continue; }
 
-            if (n != STAGE_HASH) see = static_exchange_evaluation(pos, &m);
+            if (n != STAGE_HASH && !see_ready) see = static_exchange_evaluation(pos, &m);
 
             if (n != STAGE_HASH && ply > 0 && first != NO_MOVE_YET && alpha > -MATE_SCORE + 500
                     && d <= 12 && see < (quiet ? -SEE_Q * d : -SEE_B * d * d)) { QUIET_FLOOR_MARK(quiet); continue; }
@@ -693,10 +750,11 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
 
             undo_move_full(pos, &m, &u);
 
-            if (stop_requested || position_changed) {
+            if (S2_STOP) {
                 if (ply == 0 && root_interrupted_ptr) *root_interrupted_ptr = true;
                 return alpha;
             }
+            if (w > fs_best) fs_best = w;
 
             if (w > alpha) {
                 alpha = w;
@@ -736,12 +794,14 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
     }
 
     if (first == NO_MOVE_YET) alpha = (ch || excl) ? -MATE_SCORE + ply : 0;
+    if (first == NO_MOVE_YET) fs_best = alpha;
 
+    if (pvnode && fs_best > tb_max) fs_best = tb_max;
     flag = HASH_ALPHA;
-    if (first == ALPHA_RAISED) {
-        flag  = (alpha >= beta) ? HASH_BETA : HASH_EXACT;
-        tt_pv_move = pv_triangle[ply][ply];
-    }
+    if (first != NO_MOVE_YET)
+        flag = fs_best >= fs_beta0 ? HASH_BETA : fs_best > fs_alpha0 ? HASH_EXACT : HASH_ALPHA;
+    if (first == ALPHA_RAISED) tt_pv_move = pv_triangle[ply][ply];
+    alpha = fs_best;
 
     if (!excl && !(ply == 0 && root_excluded_count > 0))
         store_hash(&main_tt, pos->hash, d, alpha, flag, tt_pv_move, ply);
@@ -787,5 +847,10 @@ Move search_root(Position* pos, int depth, int alpha, int beta, SearchInfo* info
     info->pv[sizeof(info->pv) - 1] = '\0';
 
     return pv_triangle[0][0];
+}
+
+void smp_init_shared_search(void) {
+    if (!lmr_ready) lmr_init();
+    if (!cuckoo_ready) cuckoo_init();
 }
 

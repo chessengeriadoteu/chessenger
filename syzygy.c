@@ -1,0 +1,129 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) Dariusz Domagała
+ */
+#include <stdio.h>
+#include <string.h>
+#include "syzygy.h"
+#include "movegen.h"
+#include "utils.h"
+#include "fathom/tbprobe.h"
+
+int syzygy_limit = 0;
+long long syzygy_hits = 0;
+static int limit_uci = 7;
+static bool loaded = false;
+
+static void recompute_limit(void) {
+    int n = loaded ? (int)TB_LARGEST : 0;
+    syzygy_limit = n < limit_uci ? n : limit_uci;
+}
+
+void syzygy_set_path(const char* tb_path) {
+
+    if (tb_path == NULL || tb_path[0] == '\0' || strcmp(tb_path, "<empty>") == 0) {
+
+        loaded = false;
+    } else {
+        loaded = tb_init(tb_path);
+        if (!loaded) {
+            printf("info string SyzygyPath: tb_init failed for `%s`, tablebases off\n", tb_path);
+        } else if (TB_LARGEST == 0) {
+            printf("info string SyzygyPath: no tablebase files found in `%s`\n", tb_path);
+        } else {
+            printf("info string SyzygyPath: tablebases up to %u pieces loaded\n", TB_LARGEST);
+        }
+        fflush(stdout);
+    }
+    recompute_limit();
+}
+
+void syzygy_set_limit(int limit) {
+    limit_uci = limit < 0 ? 0 : (limit > 7 ? 7 : limit);
+    recompute_limit();
+}
+
+int syzygy_largest(void) { return loaded ? (int)TB_LARGEST : 0; }
+
+#define SYZ_ARGS(pos)                                                                   \
+    (pos)->occupied[WHITE], (pos)->occupied[BLACK],                                     \
+    (pos)->pieces[WHITE][KING]   | (pos)->pieces[BLACK][KING],                          \
+    (pos)->pieces[WHITE][QUEEN]  | (pos)->pieces[BLACK][QUEEN],                         \
+    (pos)->pieces[WHITE][ROOK]   | (pos)->pieces[BLACK][ROOK],                          \
+    (pos)->pieces[WHITE][BISHOP] | (pos)->pieces[BLACK][BISHOP],                        \
+    (pos)->pieces[WHITE][KNIGHT] | (pos)->pieces[BLACK][KNIGHT],                        \
+    (pos)->pieces[WHITE][PAWN]   | (pos)->pieces[BLACK][PAWN]
+
+static int wdl_class(unsigned wdl) {
+    if (wdl == TB_WIN)  return 1;
+    if (wdl == TB_LOSS) return -1;
+    return 0;
+}
+
+static bool can_probe(const Position* pos) {
+    if (__builtin_popcountll(pos->pieces[WHITE][KING]) != 1 ||
+        __builtin_popcountll(pos->pieces[BLACK][KING]) != 1) return false;
+    return !is_in_check((Position*)pos, pos->to_move == WHITE ? BLACK : WHITE);
+}
+
+bool syzygy_probe_wdl(const Position* pos, int* wdl) {
+    if (pos->castling_rights != 0 || pos->halfmove_clock != 0) return false;
+    if (__builtin_popcountll(pos->all_pieces) > syzygy_limit) return false;
+    if (!can_probe(pos)) return false;
+    unsigned r = tb_probe_wdl(SYZ_ARGS(pos), 0, 0,
+                              pos->en_passant_square < 0 ? 0 : (unsigned)pos->en_passant_square,
+                              pos->to_move == WHITE);
+    if (r == TB_RESULT_FAILED) return false;
+    __atomic_fetch_add(&syzygy_hits, 1, __ATOMIC_RELAXED);
+    *wdl = wdl_class(r);
+    return true;
+}
+
+static PieceType promo_piece(unsigned p) {
+    switch (p) {
+        case TB_PROMOTES_QUEEN:  return QUEEN;
+        case TB_PROMOTES_ROOK:   return ROOK;
+        case TB_PROMOTES_BISHOP: return BISHOP;
+        case TB_PROMOTES_KNIGHT: return KNIGHT;
+        default:                 return EMPTY;
+    }
+}
+
+static bool result_to_move(unsigned r, const Move* tb_legal_moves, int n, Move* out) {
+    int z = (int)TB_GET_FROM(r), to_sq = (int)TB_GET_TO(r);
+    PieceType pr = promo_piece(TB_GET_PROMOTES(r));
+    for (int i = 0; i < n; i++) {
+        if (tb_legal_moves[i].from == z && tb_legal_moves[i].to == to_sq && tb_legal_moves[i].promotion == (int)pr) {
+            *out = tb_legal_moves[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+int syzygy_root(Position* pos, Move* mlist, int max, int* wdl) {
+    if (syzygy_limit == 0 || pos->castling_rights != 0) return 0;
+    if (__builtin_popcountll(pos->all_pieces) > syzygy_limit) return 0;
+    if (!can_probe(pos)) return 0;
+    static unsigned tb_results[TB_MAX_MOVES];
+    unsigned best = tb_probe_root(SYZ_ARGS(pos), (unsigned)pos->halfmove_clock, 0,
+                                  pos->en_passant_square < 0 ? 0 : (unsigned)pos->en_passant_square,
+                                  pos->to_move == WHITE, tb_results);
+    if (best == TB_RESULT_FAILED || best == TB_RESULT_CHECKMATE || best == TB_RESULT_STALEMATE) return 0;
+    syzygy_hits++;
+
+    Move tb_legal_moves[MAX_MOVES];
+    int n = generate_legal_moves(pos, tb_legal_moves);
+    int k = wdl_class(TB_GET_WDL(best));
+    *wdl = k;
+    int n_moves = 0;
+    if (k != 0) {
+
+        if (max > 0 && result_to_move(best, tb_legal_moves, n, &mlist[0])) n_moves = 1;
+    } else {
+
+        for (int i = 0; i < TB_MAX_MOVES && tb_results[i] != TB_RESULT_FAILED && n_moves < max; i++) {
+            if (wdl_class(TB_GET_WDL(tb_results[i])) == 0 && result_to_move(tb_results[i], tb_legal_moves, n, &mlist[n_moves])) n_moves++;
+        }
+    }
+    return n_moves;
+}

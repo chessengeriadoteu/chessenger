@@ -190,10 +190,19 @@ char* position_to_fen(Position* pos) {
 
     *p++ = ' ';
     bool has_castling = false;
+    if (uci_chess960) {
+
+        for (int i = 0; i < 4; i++) {
+            if (!(pos->castling_rights & (1 << i))) continue;
+            *p++ = (char)(((i < 2) ? 'A' : 'a') + (castle_rook_sq[i] & 7));
+            has_castling = true;
+        }
+    } else {
     if (pos->castling_rights & WHITE_KINGSIDE) { *p++ = 'K'; has_castling = true; }
     if (pos->castling_rights & WHITE_QUEENSIDE) { *p++ = 'Q'; has_castling = true; }
     if (pos->castling_rights & BLACK_KINGSIDE) { *p++ = 'k'; has_castling = true; }
     if (pos->castling_rights & BLACK_QUEENSIDE) { *p++ = 'q'; has_castling = true; }
+    }
     if (!has_castling) *p++ = '-';
 
     *p++ = ' ';
@@ -347,6 +356,8 @@ static int get_least_valuable_attacker(Position* pos, Bitboard attackers, Color 
 int static_exchange_evaluation(Position* pos, Move* move) {
     if (!pos || !move) return 0;
     if (move->from < 0 || move->from > 63 || move->to < 0 || move->to > 63) return 0;
+
+    if (uci_chess960 && move->is_castling) return 0;
 
     static const int see_values[7] = { 100, 500, 325, 325, 975, 10000, 0 };
 

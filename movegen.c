@@ -164,7 +164,7 @@ void init_magic_bitboards(void) {
     }
 
     if (magic_init() != 0) {
-        fprintf(stderr, "MAGIC: no multiplier found within the attempt limit; using ray scan instead\n");
+        fprintf(stderr, "MAGIC: no multiplier found within the attempt limit - falling back to ray scanning\n");
     }
 }
 
@@ -220,7 +220,7 @@ static bool is_king_move_adjacent_safe(Position* pos, int to, Color color) {
     return !(king_attacks[enemy_king_square] & (1ULL << to));
 }
 
-static Bitboard g_targets = ~0ULL;
+static SMP_TLS Bitboard g_targets = ~0ULL;
 
 int generate_pawn_moves(Position* pos, Move* moves, int move_count) {
     if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 1) return move_count;
@@ -504,8 +504,40 @@ int generate_king_moves(Position* pos, Move* moves, int move_count) {
     return move_count;
 }
 
+static inline Bitboard squares_span(int a, int b) {
+    const int lo = (a < b) ? a : b, hi = (a < b) ? b : a;
+    return ((hi == 63) ? ~0ULL : ((1ULL << (hi + 1)) - 1)) & ~((1ULL << lo) - 1);
+}
+
+static int generate_castling_moves_960(Position* pos, Move* moves, int move_count) {
+    const Color us = pos->to_move, them = 1 - us;
+    if (pos->pieces[us][KING] == 0 || is_in_check(pos, us)) return move_count;
+    const int ksq = get_lsb(pos->pieces[us][KING]);
+    const int idx0 = (us == WHITE) ? 0 : 2;
+    for (int idx = idx0; idx < idx0 + 2; idx++) {
+        if (!(pos->castling_rights & (1 << idx))) continue;
+        const int rsq = castle_rook_sq[idx];
+        if (!(pos->pieces[us][ROOK] & (1ULL << rsq)) || (rsq & 56) != (ksq & 56)) continue;
+        int king_to, rook_to;
+        castle_960_squares(ksq, rsq, &king_to, &rook_to);
+        const Bitboard empty_squares = (squares_span(ksq, king_to) | squares_span(rsq, rook_to))
+                             & ~((1ULL << ksq) | (1ULL << rsq));
+        if (pos->all_pieces & empty_squares) continue;
+        bool path_clear = true;
+        const int step = (king_to > ksq) ? 1 : -1;
+        for (int s = ksq; s != king_to && path_clear; ) {
+            s += step;
+            if (is_square_attacked(pos, s, them)) path_clear = false;
+        }
+        if (path_clear && move_count < MAX_MOVES - 1)
+            moves[move_count++] = (Move){ksq, rsq, KING, EMPTY, EMPTY, true, false, 0};
+    }
+    return move_count;
+}
+
 int generate_castling_moves(Position* pos, Move* moves, int move_count) {
     if (!pos || !moves || move_count < 0 || move_count >= MAX_MOVES - 1) return move_count;
+    if (uci_chess960) return generate_castling_moves_960(pos, moves, move_count);
 
     Color us = pos->to_move;
 

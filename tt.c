@@ -117,7 +117,8 @@ int hashfull_tt(const TranspositionTable* tt) {
     int sample_n = tt->size < 1000 ? tt->size : 1000;
     int occ_all = 0;
     for (int i = 0; i < sample_n; i++) {
-        if (tt->entries[i].key != 0) occ_all++;
+
+        if (__atomic_load_n(&tt->entries[i].key, __ATOMIC_RELAXED) != 0) occ_all++;
     }
     return (int)(((long long)occ_all * 1000) / sample_n);
 }
@@ -176,39 +177,70 @@ Move unpack_move(uint16_t packed) {
     return m;
 }
 
-_Static_assert(sizeof(HashEntry) == 16, "HashEntry must be 16 B; a different field layout costs table entries");
+_Static_assert(sizeof(HashEntry) == 16, "HashEntry must be 16 B - changing the field layout costs table entries");
 
 static inline HashEntry* tt_bucket(const TranspositionTable* tt, uint64_t key) {
     return &tt->entries[(key & (uint64_t)tt->mask) & ~(uint64_t)(TT_BUCKET - 1)];
 }
-static inline int tt_age(const TranspositionTable* tt) { return tt->age & 63; }
+#define TT_AGE_MASK 63
+static inline int tt_age(const TranspositionTable* tt) { return tt->age & TT_AGE_MASK; }
 static inline int tt_bound(const HashEntry* e)         { return e->genflag & 3; }
 static inline int tt_victim_score(const HashEntry* e, int cur_age) {
-    return (int)e->depth - 4 * ((cur_age - (e->genflag >> 2)) & 63);
+    return (int)e->depth - 4 * ((cur_age - ((e->genflag >> 2) & TT_AGE_MASK)) & TT_AGE_MASK);
 }
 
-static HashEntry* tt_find(TranspositionTable* tt, uint64_t key) {
-    if (!tt->entries || tt->size == 0) return NULL;
+#define TT_KEEP_PLIES 3
+static inline int tt_keep_old(const TranspositionTable* tt, const HashEntry* old_entry, uint64_t key, int depth, HashFlag flag) {
+    return old_entry->key == key && tt_bound(old_entry) != HASH_NONE
+        && ((old_entry->genflag >> 2) & TT_AGE_MASK) == tt_age(tt)
+        && flag != HASH_EXACT && depth + TT_KEEP_PLIES < (int)old_entry->depth;
+}
+
+typedef uint64_t __attribute__((may_alias)) tt_word64;
+_Static_assert(offsetof(HashEntry, score) == 8, "TT entry data starts at byte 8");
+
+static inline void tt_read(HashEntry* e, HashEntry* buf_copy) {
+    const uint64_t k = __atomic_load_n((tt_word64*)(void*)e,     __ATOMIC_RELAXED);
+    const uint64_t d = __atomic_load_n((tt_word64*)(void*)e + 1, __ATOMIC_RELAXED);
+    memcpy((char*)buf_copy + 8, &d, 8);
+    buf_copy->key = k ^ d;
+}
+
+static inline void tt_write(HashEntry* e, const HashEntry* new_entry) {
+    uint64_t d;
+    memcpy(&d, (const char*)new_entry + 8, 8);
+    __atomic_store_n((tt_word64*)(void*)e + 1, d,             __ATOMIC_RELAXED);
+    __atomic_store_n((tt_word64*)(void*)e,     new_entry->key ^ d, __ATOMIC_RELAXED);
+}
+
+static bool tt_find(TranspositionTable* tt, uint64_t key, HashEntry* w) {
+    if (!tt->entries || tt->size == 0) return false;
     HashEntry* k = tt_bucket(tt, key);
     for (int i = 0; i < TT_BUCKET; i++) {
-        if (k[i].key == key) {
-            k[i].genflag = (uint8_t)((tt_age(tt) << 2) | tt_bound(&k[i]));
-            return &k[i];
+        tt_read(&k[i], w);
+        if (w->key == key) {
+            const uint8_t g = (uint8_t)((tt_age(tt) << 2) | tt_bound(w));
+            if (g != w->genflag) { w->genflag = g; tt_write(&k[i], w); }
+            return true;
         }
-        if (k[i].key == 0) return NULL;
+        if (w->key == 0) return false;
     }
-    return NULL;
+    return false;
 }
 
-static HashEntry* tt_slot(TranspositionTable* tt, uint64_t key) {
+static HashEntry* tt_slot(TranspositionTable* tt, uint64_t key, HashEntry* old_entry) {
     HashEntry* k = tt_bucket(tt, key);
-    for (int i = 0; i < TT_BUCKET; i++)
-        if (k[i].key == key || k[i].key == 0) return &k[i];
+    HashEntry w[TT_BUCKET];
+    for (int i = 0; i < TT_BUCKET; i++) {
+        tt_read(&k[i], &w[i]);
+        if (w[i].key == key || w[i].key == 0) { *old_entry = w[i]; return &k[i]; }
+    }
     const int cur_age = tt_age(tt);
-    HashEntry* victim = &k[0];
+    int o = 0;
     for (int i = 1; i < TT_BUCKET; i++)
-        if (tt_victim_score(&k[i], cur_age) < tt_victim_score(victim, cur_age)) victim = &k[i];
-    return victim;
+        if (tt_victim_score(&w[i], cur_age) < tt_victim_score(&w[o], cur_age)) o = i;
+    *old_entry = w[o];
+    return &k[o];
 }
 
 void store_hash(TranspositionTable* tt, uint64_t key, int depth, int score, HashFlag flag, Move best_move, int ply) {
@@ -222,48 +254,55 @@ void store_hash_eval(TranspositionTable* tt, uint64_t key, int depth, int score,
     if (depth < 0)   depth = 0;
     if (depth > 255) depth = 255;
 
-    HashEntry* e = tt_slot(tt, key);
-    if (eval == TT_EVAL_NONE && e->key == key) eval = e->eval;
-    e->key       = key;
-    e->score     = (int16_t)score;
-    e->eval      = (int16_t)eval;
-    e->best_move = pack_move(best_move);
-    e->depth     = (uint8_t)depth;
-    e->genflag   = (uint8_t)((tt_age(tt) << 2) | (int)flag);
+    HashEntry old_entry, new_entry;
+    HashEntry* e = tt_slot(tt, key, &old_entry);
+    if (tt_keep_old(tt, &old_entry, key, depth, flag)) return;
+    if (eval == TT_EVAL_NONE && old_entry.key == key) eval = old_entry.eval;
+    new_entry.key       = key;
+    new_entry.score     = (int16_t)score;
+    new_entry.eval      = (int16_t)eval;
+    new_entry.best_move = pack_move(best_move);
+    if (new_entry.best_move == 0 && old_entry.key == key) new_entry.best_move = old_entry.best_move;
+    new_entry.depth     = (uint8_t)depth;
+    new_entry.genflag   = (uint8_t)((tt_age(tt) << 2) | (int)flag);
+    tt_write(e, &new_entry);
 }
 
 void tt_store_eval(TranspositionTable* tt, uint64_t key, int eval) {
     if (!tt->entries || tt->size == 0) return;
-    HashEntry* e = tt_slot(tt, key);
-    if (e->key == key) { e->eval = (int16_t)eval; return; }
-    e->key       = key;
-    e->score     = 0;
-    e->eval      = (int16_t)eval;
-    e->best_move = 0;
-    e->depth     = 0;
-    e->genflag   = (uint8_t)((tt_age(tt) << 2) | HASH_NONE);
+    HashEntry old_entry;
+    HashEntry* e = tt_slot(tt, key, &old_entry);
+    if (old_entry.key == key) { old_entry.eval = (int16_t)eval; tt_write(e, &old_entry); return; }
+    HashEntry new_entry;
+    new_entry.key       = key;
+    new_entry.score     = 0;
+    new_entry.eval      = (int16_t)eval;
+    new_entry.best_move = 0;
+    new_entry.depth     = 0;
+    new_entry.genflag   = (uint8_t)((tt_age(tt) << 2) | HASH_NONE);
+    tt_write(e, &new_entry);
 }
 
 bool tt_probe_entry(TranspositionTable* tt, uint64_t key, int ply, TTProbe* out) {
-    HashEntry* e = tt_find(tt, key);
-    if (!e) { out->result_bb = false; out->eval = TT_EVAL_NONE; out->mv = 0; return false; }
-    out->flag  = tt_bound(e);
+    HashEntry w;
+    if (!tt_find(tt, key, &w)) { out->result_bb = false; out->eval = TT_EVAL_NONE; out->mv = 0; return false; }
+    out->flag  = tt_bound(&w);
     out->result_bb = out->flag != HASH_NONE;
-    out->depth = e->depth;
-    out->score = score_from_tt(e->score, ply);
-    out->eval  = e->eval;
-    out->mv  = e->best_move;
+    out->depth = w.depth;
+    out->score = score_from_tt(w.score, ply);
+    out->eval  = w.eval;
+    out->mv  = w.best_move;
     return true;
 }
 
 bool probe_hash(TranspositionTable* tt, uint64_t key, int depth, int alpha, int beta, int* score, Move* best_move, int ply) {
-    HashEntry* entry = tt_find(tt, key);
-    if (!entry) return false;
-    if (best_move && entry->best_move != 0) *best_move = unpack_move(entry->best_move);
-    const int flag = tt_bound(entry);
+    HashEntry w;
+    if (!tt_find(tt, key, &w)) return false;
+    if (best_move && w.best_move != 0) *best_move = unpack_move(w.best_move);
+    const int flag = tt_bound(&w);
     if (flag == HASH_NONE) return false;
-    if (entry->depth >= depth) {
-        int s = score_from_tt(entry->score, ply);
+    if (w.depth >= depth) {
+        int s = score_from_tt(w.score, ply);
         if (flag == HASH_EXACT)                   { *score = s;     return true; }
         if (flag == HASH_ALPHA && s <= alpha)     { *score = alpha; return true; }
         if (flag == HASH_BETA  && s >= beta)      { *score = beta;  return true; }
@@ -272,18 +311,18 @@ bool probe_hash(TranspositionTable* tt, uint64_t key, int depth, int alpha, int 
 }
 
 bool probe_hash_entry(TranspositionTable* tt, uint64_t key, int* depth, int* flag, int* score, int ply) {
-    HashEntry* entry = tt_find(tt, key);
-    if (!entry || tt_bound(entry) == HASH_NONE) return false;
-    *depth = entry->depth;
-    *flag  = tt_bound(entry);
-    *score = score_from_tt(entry->score, ply);
+    HashEntry w;
+    if (!tt_find(tt, key, &w) || tt_bound(&w) == HASH_NONE) return false;
+    *depth = w.depth;
+    *flag  = tt_bound(&w);
+    *score = score_from_tt(w.score, ply);
     return true;
 }
 
 bool tt_node_value(TranspositionTable* tt, uint64_t key, int* score, int ply) {
-    HashEntry* entry = tt_find(tt, key);
-    if (!entry || tt_bound(entry) != HASH_EXACT) return false;
-    int s = score_from_tt(entry->score, ply);
+    HashEntry w;
+    if (!tt_find(tt, key, &w) || tt_bound(&w) != HASH_EXACT) return false;
+    int s = score_from_tt(w.score, ply);
     if (s >=  MATE_SCORE - MATE_DISTANCE_BOUND) return false;
     if (s <= -MATE_SCORE + MATE_DISTANCE_BOUND) return false;
     *score = s;

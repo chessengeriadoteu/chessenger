@@ -136,7 +136,7 @@ static Bitboard random_sparse(void) {
     return random_u64() & random_u64() & random_u64();
 }
 
-static int find_magic(int square, int rook_sq,
+static int find_magic(int square, int rook_sq_idx,
                            Bitboard mask_bb, Bitboard *out_multiplier,
                            int *out_shift,
                            Bitboard *table_out, unsigned slots,
@@ -154,7 +154,7 @@ static int find_magic(int square, int rook_sq,
 
     for (unsigned i = 0; i < num_subsets; i++) {
         occupancies[i] = nth_subset(i, mask_bb);
-        reference_attacks[i] = rook_sq ? scan_rook(square, occupancies[i])
+        reference_attacks[i] = rook_sq_idx ? scan_rook(square, occupancies[i])
                           : scan_bishop(square, occupancies[i]);
     }
 

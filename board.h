@@ -18,6 +18,14 @@ typedef enum { PAWN, ROOK, KNIGHT, BISHOP, QUEEN, KING, EMPTY } PieceType;
 #define BLACK_KINGSIDE  4
 #define BLACK_QUEENSIDE 8
 
+extern bool uci_chess960;
+extern int castle_rook_sq[4];
+static inline void castle_960_squares(int from, int to, int* king_to, int* rook_to) {
+    const int back_rank_base = from & 56;
+    *king_to = back_rank_base + ((to > from) ? 6 : 2);
+    *rook_to = back_rank_base + ((to > from) ? 5 : 3);
+}
+
 #define MAX_POSITION_HISTORY 246
 
 #define HISTORY_SEARCH_RESERVE 144
@@ -25,11 +33,11 @@ typedef enum { PAWN, ROOK, KNIGHT, BISHOP, QUEEN, KING, EMPTY } PieceType;
 #define HISTORY_GAME_LIMIT (MAX_POSITION_HISTORY - HISTORY_SEARCH_RESERVE)
 
 typedef struct {
-    int from;
-    int to;
-    PieceType piece;
-    PieceType captured;
-    PieceType promotion;
+    int8_t from;
+    int8_t to;
+    int8_t piece;
+    int8_t captured;
+    int8_t promotion;
     bool is_castling;
     bool is_en_passant;
     int score;
