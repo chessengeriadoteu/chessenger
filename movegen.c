@@ -120,6 +120,9 @@ Bitboard ray_scan_bishop_public(int square, Bitboard occupied) {
     return ray_scan_bishop(square, occupied);
 }
 
+static Bitboard squares_between(int a, int b);
+static Bitboard between_table[64][64];
+#  define BETWEEN_SQUARES(a, b) (between_table[(a)][(b)])
 void init_magic_bitboards(void) {
 
     for (int sq = 0; sq < 64; sq++) {
@@ -166,6 +169,8 @@ void init_magic_bitboards(void) {
     if (magic_init() != 0) {
         fprintf(stderr, "MAGIC: no multiplier found within the attempt limit - falling back to ray scanning\n");
     }
+    for (int a = 0; a < 64; a++)
+        for (int b = 0; b < 64; b++) between_table[a][b] = squares_between(a, b);
 }
 
 bool is_square_attacked(Position* pos, int square, Color by_color) {
@@ -541,6 +546,8 @@ int generate_castling_moves(Position* pos, Move* moves, int move_count) {
 
     Color us = pos->to_move;
 
+    if (!(pos->castling_rights & (us == WHITE ? (WHITE_KINGSIDE | WHITE_QUEENSIDE) : (BLACK_KINGSIDE | BLACK_QUEENSIDE)))) return move_count;
+
     if (is_in_check(pos, us)) return move_count;
 
     Bitboard king = pos->pieces[us][KING];
@@ -731,7 +738,7 @@ static void legality_context_init(Position* pos, LegalityContext* k) {
     k->num_checkers = __builtin_popcountll(checkers_bb);
     if (k->num_checkers == 1) {
 
-        k->target_bb = checkers_bb | squares_between(k->king_sq_idx, get_lsb(checkers_bb));
+        k->target_bb = checkers_bb | BETWEEN_SQUARES(k->king_sq_idx, get_lsb(checkers_bb));
     } else if (k->num_checkers > 1) {
         k->target_bb = 0;
     }
@@ -744,7 +751,7 @@ static void legality_context_init(Position* pos, LegalityContext* k) {
     while (snipers) {
         const int s = get_lsb(snipers);
         snipers &= snipers - 1;
-        const Bitboard segment  = squares_between(k->king_sq_idx, s);
+        const Bitboard segment  = BETWEEN_SQUARES(k->king_sq_idx, s);
         const Bitboard between_bb = segment & pos->all_pieces;
         if (between_bb == 0) continue;
         if (between_bb & (between_bb - 1)) continue;
@@ -881,7 +888,7 @@ int generate_check_evasions(Position* pos, Move* moves) {
     if (!double_check) {
         const int checker_sq = __builtin_ctzll(checkers_bb);
         targets |= checkers_bb;
-        targets |= squares_between(king_sq_idx, checker_sq);
+        targets |= BETWEEN_SQUARES(king_sq_idx, checker_sq);
 
         if (pos->en_passant_square >= 0 &&
             (pos->pieces[opp_color][PAWN] & (1ULL << checker_sq))) {
@@ -893,8 +900,13 @@ int generate_check_evasions(Position* pos, Move* moves) {
 
     Move buf_area[MAX_MOVES];
     int total_moves = 0;
-    total_moves = generate_pawn_moves(pos, buf_area, total_moves);
-    total_moves = generate_piece_moves(pos, buf_area, total_moves);
+
+    if (!double_check) {
+        g_targets = targets;
+        total_moves = generate_pawn_moves(pos, buf_area, total_moves);
+        total_moves = generate_piece_moves(pos, buf_area, total_moves);
+        g_targets = ~0ULL;
+    }
     total_moves = generate_king_moves(pos, buf_area, total_moves);
     total_moves = generate_en_passant_moves(pos, buf_area, total_moves);
 

@@ -1,7 +1,8 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later
+/* SPDX-License-Identifier: GPL-3.0-or-later AND GPL-3.0-only
  * Copyright (C) Dariusz Domagała
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
- * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-10.
+ * Copyright (C) Sam Moore (SimpleChess 3.5.0)
+ * Portions of this file are adapted from Stash 37 and SimpleChess 3.5.0. Modified by Dariusz Domagała, 2026-10-15.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,7 +28,7 @@
 #define NULL_DEVICE "/dev/null"
 #endif
 
-#define ENGINE_VERSION "2.0"
+#define ENGINE_VERSION "2.9.5"
 
 bool position_changed = false;
 bool stop_requested = false;
@@ -613,13 +614,17 @@ float assess_position_complexity(Position* pos) {
 
 #include <math.h>
 
+#define EFFORT_SCORE_BAND 10000
+
+#define TM_HARD_CAP(mt) ((long long)((mt) * 0.40f))
+
 static int tm_flexible = 0;
 
 static int tm_hard_ms = 0;
 
 static int tm_set_hard(int go_budget_ms, int my_time) {
     long long hard_ms = (long long)go_budget_ms * 5 / 2;
-    long long cap_ms  = (long long)(my_time * 0.40f);
+    long long cap_ms  = TM_HARD_CAP(my_time);
     if (hard_ms > cap_ms)  hard_ms = cap_ms;
     if (hard_ms < go_budget_ms) hard_ms = go_budget_ms;
     tm_hard_ms = (int)hard_ms;
@@ -751,7 +756,7 @@ int calculate_search_time(int wtime, int btime, int winc, int binc, int movestog
 
     {
         long long hard_ms = (long long)final_time * 5 / 2;
-        long long cap_ms  = (long long)(my_time * 0.40f);
+        long long cap_ms  = TM_HARD_CAP(my_time);
         if (hard_ms > cap_ms)      hard_ms = cap_ms;
         if (hard_ms < final_time) hard_ms = final_time;
         tm_hard_ms = (int)hard_ms;
@@ -1040,12 +1045,47 @@ _Static_assert(-(ROOT_FULL_ALPHA) > MATE_SCORE, "root sentinel must lie outside 
 #define ASPIRATION_WINDOW   30
 #define MIN_ASPIRATION_DEPTH 3
 
+static long long uci_nodes_before    = 0;
+static int       uci_iter_depth = 0;
+static long long uci_nodes_now(const SearchInfo* info) { return SMP_NODES(uci_nodes_before + info->nodes); }
+
+static void uci_root_change_main(const SearchInfo* info, int score, const char* pv) {
+    if (multipv_setting > 1 || uci_iter_depth <= 0) return;
+    long long t = uci_gate_ms();
+    if (t < 0) return;
+    print_uci_info(uci_iter_depth, info->seldepth, score, t, uci_nodes_now(info), pv);
+}
+
+static void uci_report_window_bound(int depth, const SearchInfo* info, Move mv, bool is_lower_bound) {
+    if (multipv_setting > 1) return;
+    long long t = uci_gate_ms();
+    if (t < 0) return;
+    char result_bb[32];
+    int mate_plies = MATE_SCORE - (info->score < 0 ? -info->score : info->score);
+    if (mate_plies >= 0 && mate_plies < MAX_DEPTH * 2) {
+        int mate_moves = (mate_plies + 1) / 2;
+        snprintf(result_bb, sizeof(result_bb), "mate %d", info->score < 0 ? -mate_moves : mate_moves);
+    } else {
+        snprintf(result_bb, sizeof(result_bb), "cp %d", info->score);
+    }
+    char pv[16] = "";
+    if (mv.from >= 0 && mv.to >= 0 && mv.from < 64 && mv.to < 64 && mv.from != mv.to)
+        snprintf(pv, sizeof(pv), " pv %s", move_to_string(&mv));
+    long long n = uci_nodes_now(info);
+    long long nps = t > 0 ? n * 1000LL / t : 0;
+    printf("info depth %d seldepth %d score %s %s time %lld nodes %lld nps %lld%s\n", depth, info->seldepth, result_bb,
+           is_lower_bound ? "lowerbound" : "upperbound", t, n, nps, pv);
+    fflush(stdout);
+}
+
 static Move search_root_with_aspiration(Position* pos, int depth, int previous_score,
                                         bool use_aspiration, SearchInfo* info,
                                         bool* window_open) {
     int delta = ASPIRATION_WINDOW;
     int alpha = ROOT_FULL_ALPHA;
     int beta  = ROOT_FULL_BETA;
+    uci_iter_depth  = depth;
+    uci_root_change_hook = uci_root_change_main;
 
     {
         Move best_found = {0};
@@ -1074,10 +1114,12 @@ static Move search_root_with_aspiration(Position* pos, int depth, int previous_s
             }
 
             if (info->score <= alpha && alpha > ROOT_FULL_ALPHA) {
+                uci_report_window_bound(depth, info, best_found, false);
                 search_depth_cur = depth;
                 beta   = (alpha + beta) / 2;
                 alpha  = info->score - delta;
             } else if (info->score >= beta && beta < ROOT_FULL_BETA) {
+                uci_report_window_bound(depth, info, best_found, true);
                 search_depth_cur -= (search_depth_cur - 1 > (depth - 1) / 2);
                 beta   = info->score + delta;
             } else {
@@ -1110,10 +1152,12 @@ static Move search_root_with_aspiration(Position* pos, int depth, int previous_s
         }
 
         if (info->score <= alpha && alpha > ROOT_FULL_ALPHA) {
+            uci_report_window_bound(depth, info, best, false);
             delta *= 4;
             alpha = previous_score - delta;
             if (alpha < ROOT_FULL_ALPHA) alpha = ROOT_FULL_ALPHA;
         } else if (info->score >= beta && beta < ROOT_FULL_BETA) {
+            uci_report_window_bound(depth, info, best, true);
             delta *= 4;
             beta = previous_score + delta;
             if (beta > ROOT_FULL_BETA) beta = ROOT_FULL_BETA;
@@ -1246,6 +1290,8 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
             if (tm_soft) {
 
                 if (elapsed_before >= cs_optimal) break;
+
+                if ((double)elapsed_before * 1.4 > (double)tm_hard) break;
             } else
             if (tm_soft) {
 
@@ -1268,6 +1314,7 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
 
         bool use_aspiration = (depth >= MIN_ASPIRATION_DEPTH && valid_move_found);
         bool window_open = false;
+        uci_nodes_before = nodes_total;
         Move current_best = search_root_with_aspiration(pos, depth, previous_score,
                                                         use_aspiration, &info, &window_open);
 
@@ -1304,6 +1351,11 @@ Move search_with_time_limit(Position* pos, int time_limit_ms, SearchInfo* final_
             }
             long long opt = (long long)(tm_soft * time_scale);
             cs_optimal = opt < tm_hard ? opt : tm_hard;
+            if (valid_move_found && depth >= 12 && cs_stab >= 4 && !cs_only_move && root_excluded_count == 0
+                    && abs(info.score) < EFFORT_SCORE_BAND && effort_total > 0) {
+                const long long effort_share_pct = 100 * effort_best / effort_total;
+                if (effort_share_pct > 95) cs_optimal = cs_optimal * (100 - 60 * (effort_share_pct - 95) / 5) / 100;
+            }
         }
 
         best_move = current_best;
@@ -1521,6 +1573,8 @@ int main(int argc, char** argv) {
 
             printf("option name SyzygyPath type string default <empty>\n");
             printf("option name SyzygyProbeLimit type spin default 7 min 0 max 7\n");
+            printf("option name SyzygyProbeDepth type spin default 1 min 1 max 100\n");
+            printf("option name Syzygy50MoveRule type check default true\n");
 
             printf("option name UCI_Chess960 type check default false\n");
             printf("uciok\n");
@@ -1675,6 +1729,27 @@ int main(int argc, char** argv) {
                 } else {
                     syzygy_set_limit((int)want_l);
                     printf("info string SyzygyProbeLimit %ld: probing up to %d pieces\n", want_l, syzygy_limit);
+                }
+                fflush(stdout);
+            } else if (opt_ok && strcasecmp(opt_name, "SyzygyProbeDepth") == 0) {
+
+                if (opt_value[0] == '\0' || !parse_uci_int(opt_value, &want_l)) {
+                    printf("info string setoption SyzygyProbeDepth: value `%s` is not a number, option ignored\n",
+                           opt_value);
+                } else {
+                    long g = want_l < 1 ? 1 : (want_l > 100 ? 100 : want_l);
+                    syzygy_set_depth((int)g);
+                    printf("info string SyzygyProbeDepth %ld\n", g);
+                }
+                fflush(stdout);
+            } else if (opt_ok && strcasecmp(opt_name, "Syzygy50MoveRule") == 0) {
+
+                if (strcmp(opt_value, "true") == 0 || strcmp(opt_value, "false") == 0) {
+                    syzygy_set_rule50(opt_value[0] == 't');
+                    printf("info string Syzygy50MoveRule %s\n", opt_value);
+                } else {
+                    printf("info string setoption Syzygy50MoveRule: value `%s` is neither `true` nor `false`, "
+                           "option ignored\n", opt_value);
                 }
                 fflush(stdout);
             } else if (opt_ok) {
@@ -1868,6 +1943,7 @@ int main(int argc, char** argv) {
 
                     bool use_aspiration = (depth >= MIN_ASPIRATION_DEPTH && valid_move_found);
                     bool window_open = false;
+                    uci_nodes_before = 0;
                     Move current_best = search_root_with_aspiration(&pos, depth, previous_score,
                                                                     use_aspiration, &info,
                                                                     &window_open);
@@ -2004,6 +2080,7 @@ int main(int argc, char** argv) {
 
                     bool use_aspiration = (depth >= MIN_ASPIRATION_DEPTH && valid_move_found);
                     bool window_open = false;
+                    uci_nodes_before = nodes_total;
                     Move current_best = search_root_with_aspiration(&pos, depth, previous_score,
                                                                     use_aspiration, &info,
                                                                     &window_open);

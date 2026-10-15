@@ -46,7 +46,11 @@ int hashfull_tt(const TranspositionTable* tt);
 void free_tt(TranspositionTable* tt);
 
 #define TT_HASH_MB_MIN      1
+#if UINTPTR_MAX > 0xFFFFFFFFu
+#define TT_HASH_MB_MAX      16384
+#else
 #define TT_HASH_MB_MAX      1024
+#endif
 #define TT_HASH_MB_DEFAULT  64
 
 size_t resize_tt(TranspositionTable* tt, int size_mb);
@@ -73,6 +77,7 @@ bool tt_probe_entry(TranspositionTable* tt, uint64_t key, int ply, TTProbe* out)
 void store_hash_eval(TranspositionTable* tt, uint64_t key, int depth, int score, HashFlag flag, Move best_move, int ply, int eval);
 
 void tt_store_eval(TranspositionTable* tt, uint64_t key, int eval);
+void tt_store_qs(TranspositionTable* tt, uint64_t key, int score, HashFlag flag, Move best_move, int ply);
 
 extern TranspositionTable main_tt;
 

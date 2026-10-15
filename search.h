@@ -42,6 +42,8 @@ Move search_single_depth_with_nodes(Position* pos, int depth, int alpha, int bet
 
 bool was_root_search_interrupted(void);
 
+extern long long effort_total, effort_best;
+
 #define MAX_MULTIPV 218
 extern Move root_excluded[MAX_MULTIPV];
 extern int  root_excluded_count;
@@ -74,6 +76,8 @@ void set_search_time_limit(long long time_limit_ms);
 void set_search_unbounded(bool unbounded);
 void start_search_timer(void);
 bool is_time_exceeded(void);
+long long uci_gate_ms(void);
+extern void (*uci_root_change_hook)(const SearchInfo* info, int score, const char* pv);
 
 void set_ponder_mode(bool on, long long budget_ms);
 bool is_ponder_mode(void);

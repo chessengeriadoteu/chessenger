@@ -11,6 +11,8 @@
 int syzygy_limit = 0;
 long long syzygy_hits = 0;
 static int limit_uci = 7;
+static int probe_depth_uci = 1;
+static bool rule50_enabled = true;
 static bool loaded = false;
 
 static void recompute_limit(void) {
@@ -42,6 +44,12 @@ void syzygy_set_limit(int limit) {
     recompute_limit();
 }
 
+void syzygy_set_depth(int depth_arg) {
+    probe_depth_uci = depth_arg < 1 ? 1 : (depth_arg > 100 ? 100 : depth_arg);
+}
+
+void syzygy_set_rule50(bool enabled) { rule50_enabled = enabled; }
+
 int syzygy_largest(void) { return loaded ? (int)TB_LARGEST : 0; }
 
 #define SYZ_ARGS(pos)                                                                   \
@@ -54,8 +62,8 @@ int syzygy_largest(void) { return loaded ? (int)TB_LARGEST : 0; }
     (pos)->pieces[WHITE][PAWN]   | (pos)->pieces[BLACK][PAWN]
 
 static int wdl_class(unsigned wdl) {
-    if (wdl == TB_WIN)  return 1;
-    if (wdl == TB_LOSS) return -1;
+    if (wdl == TB_WIN  || (!rule50_enabled && wdl == TB_CURSED_WIN))   return 1;
+    if (wdl == TB_LOSS || (!rule50_enabled && wdl == TB_BLESSED_LOSS)) return -1;
     return 0;
 }
 
@@ -65,9 +73,11 @@ static bool can_probe(const Position* pos) {
     return !is_in_check((Position*)pos, pos->to_move == WHITE ? BLACK : WHITE);
 }
 
-bool syzygy_probe_wdl(const Position* pos, int* wdl) {
+bool syzygy_probe_wdl(const Position* pos, int depth, int* wdl) {
     if (pos->castling_rights != 0 || pos->halfmove_clock != 0) return false;
-    if (__builtin_popcountll(pos->all_pieces) > syzygy_limit) return false;
+    int piece_count = __builtin_popcountll(pos->all_pieces);
+    if (piece_count > syzygy_limit) return false;
+    if (piece_count == syzygy_limit && depth < probe_depth_uci) return false;
     if (!can_probe(pos)) return false;
     unsigned r = tb_probe_wdl(SYZ_ARGS(pos), 0, 0,
                               pos->en_passant_square < 0 ? 0 : (unsigned)pos->en_passant_square,

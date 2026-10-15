@@ -10,9 +10,9 @@ ZIG     ?= zig
 CFLAGS  := -std=c99 -O3 -flto -DNDEBUG -Wall -Wextra
 LDLIBS  := -lm
 ENGINE  := $(strip $(filter-out win_stdin.c,$(wildcard *.c)) $(wildcard fathom/tbprobe.c))
-VERSION := 2.0
+VERSION := 2.9.5
 # release date in the build banner (`main.c`, BUILD_DATE); only a string, search and evaluation do not read it
-BUILD_DATE := 2026-10-10
+BUILD_DATE := 2026-10-15
 CFLAGS  += '-DBUILD_DATE="$(BUILD_DATE)"'
 
 # Syzygy (version 2.0 and later): fathom/tbprobe.c is the only Fathom unit (it includes tbchess.c itself), so it is

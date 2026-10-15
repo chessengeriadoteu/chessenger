@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND MIT
  * Copyright (C) Dariusz Domagała
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
- * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-10-10.
+ * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-10-15.
  */
 #define RFP_MARGIN 150
 #include "search.h"
@@ -44,7 +44,7 @@ _Static_assert(MAX_MOVES == 256, "Move[256] literals in search.c assume MAX_MOVE
 
 static char pending_input[MAX_UCI_LINE * 2] = "";
 static bool has_pending_input = false;
-static SMP_TLS int check_counter = 0;
+#define check_counter (smp_control.numerator)
 
 static SMP_TLS bool root_search_interrupted = false;
 
@@ -172,8 +172,7 @@ bool node_limit_hit(void) {
 }
 
 int  smp_stop = 0;
-SMP_TLS bool       smp_helper  = false;
-SMP_TLS long long* smp_nodes_pub = NULL;
+SMP_TLS SmpControl smp_control = { false, 0, NULL };
 
 void smp_helper_new_go(void) {
     nodes_searched = 0;
@@ -201,6 +200,12 @@ static bool currmove_gate_open(void) {
     if (!search_timer_started) return false;
     return time_diff_ms(search_start_time, get_wall_time()) >= CURRMOVE_GATE_MS;
 }
+
+long long uci_gate_ms(void) {
+    return currmove_gate_open() ? time_diff_ms(search_start_time, get_wall_time()) : -1;
+}
+
+void (*uci_root_change_hook)(const SearchInfo* info, int score, const char* pv) = NULL;
 
 bool is_time_exceeded(void) {
     if (search_time_limit_ms <= 0) return false;
@@ -1232,19 +1237,21 @@ static size_t drop_nul_lines(char* buf, size_t len, size_t* dropped) {
     return out;
 }
 
+__attribute__((noinline)) static bool fast_check_stop_slow(void);
 bool fast_check_stop(void) {
     if (smp_helper) return smp_helper_stop();
-
     if (node_limit_active && SMP_NODES(nodes_searched) >= node_limit) {
         node_limit_reached = true;
         stop_requested = true;
         return true;
     }
-
     check_counter++;
     if (check_counter < CHECK_STOP_FREQUENCY) {
         return stop_requested;
     }
+    return fast_check_stop_slow();
+}
+__attribute__((noinline)) static bool fast_check_stop_slow(void) {
     check_counter = 0;
 
     bool abort_now = false;

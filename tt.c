@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) Dariusz Domagała
+ * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
+ * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-15.
  */
 #include "tt.h"
 #include "utils.h"
@@ -76,8 +78,12 @@ uint64_t compute_hash(Position* pos) {
     return hash;
 }
 
+_Static_assert((uint64_t)TT_HASH_MB_MAX * 1024 * 1024 / 16 <= 0x7FFFFFFF,
+               "TT_HASH_MB_MAX: the number of entries must fit in `int` (`size`, `mask`)");
+
 void init_tt(TranspositionTable* tt, int size_mb) {
-    int entries = (size_mb * 1024 * 1024) / sizeof(HashEntry);
+
+    int entries = (int)(((uint64_t)size_mb * 1024 * 1024) / sizeof(HashEntry));
 
     int size = 1;
     while (size <= entries / 2) {
@@ -219,7 +225,7 @@ static bool tt_find(TranspositionTable* tt, uint64_t key, HashEntry* w) {
     for (int i = 0; i < TT_BUCKET; i++) {
         tt_read(&k[i], w);
         if (w->key == key) {
-            const uint8_t g = (uint8_t)((tt_age(tt) << 2) | tt_bound(w));
+            const uint8_t g = (uint8_t)((w->genflag & 0) | (tt_age(tt) << 2) | tt_bound(w));
             if (g != w->genflag) { w->genflag = g; tt_write(&k[i], w); }
             return true;
         }
@@ -317,6 +323,43 @@ bool probe_hash_entry(TranspositionTable* tt, uint64_t key, int* depth, int* fla
     *flag  = tt_bound(&w);
     *score = score_from_tt(w.score, ply);
     return true;
+}
+
+void tt_store_qs(TranspositionTable* tt, uint64_t key, int score, HashFlag flag, Move best_move, int ply) {
+    if (!tt->entries || tt->size == 0) return;
+    HashEntry* k = tt_bucket(tt, key);
+    HashEntry w[TT_BUCKET];
+    int o = -1;
+    for (int i = 0; i < TT_BUCKET; i++) {
+        tt_read(&k[i], &w[i]);
+        if (w[i].key == key) {
+            const uint8_t g = (uint8_t)((w[i].genflag & 0) | (tt_age(tt) << 2) | tt_bound(&w[i]));
+            if (g != w[i].genflag) { w[i].genflag = g; tt_write(&k[i], &w[i]); }
+            if (tt_bound(&w[i]) != HASH_NONE && w[i].depth > 0) return;
+            o = i;
+            break;
+        }
+        if (w[i].key == 0) { o = i; break; }
+    }
+    if (score > MATE_SCORE || score < -MATE_SCORE) return;
+    if (o < 0) {
+        const int cur_age = tt_age(tt);
+        o = 0;
+        for (int i = 1; i < TT_BUCKET; i++)
+            if (tt_victim_score(&w[i], cur_age) < tt_victim_score(&w[o], cur_age)) o = i;
+    }
+    const HashEntry old_entry = w[o];
+    HashEntry new_entry;
+    score = score_to_tt(score, ply);
+    if (tt_keep_old(tt, &old_entry, key, 0, flag)) return;
+    new_entry.key       = key;
+    new_entry.score     = (int16_t)score;
+    new_entry.eval      = (int16_t)(old_entry.key == key ? old_entry.eval : TT_EVAL_NONE);
+    new_entry.best_move = pack_move(best_move);
+    if (new_entry.best_move == 0 && old_entry.key == key) new_entry.best_move = old_entry.best_move;
+    new_entry.depth     = 0;
+    new_entry.genflag   = (uint8_t)((tt_age(tt) << 2) | (int)flag);
+    tt_write(&k[o], &new_entry);
 }
 
 bool tt_node_value(TranspositionTable* tt, uint64_t key, int* score, int ply) {

@@ -107,6 +107,7 @@ bool has_insufficient_material(Position* pos);
 bool is_threefold_repetition(Position* pos);
 bool is_approaching_repetition(Position* pos);
 int count_position_occurrences(Position* pos, uint64_t hash);
+int count_position_occurrences_max2(Position* pos, uint64_t hash);
 void add_position_to_history(Position* pos, uint64_t hash);
 void remove_last_position_from_history(Position* pos, UndoInfo* undo);
 

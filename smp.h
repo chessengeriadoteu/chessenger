@@ -10,9 +10,14 @@
 
 extern int smp_stop;
 
-extern SMP_TLS bool smp_helper;
-
-extern SMP_TLS long long* smp_nodes_pub;
+typedef struct {
+    bool       is_helper;
+    int        numerator;
+    long long* nodes_pub;
+} SmpControl;
+extern SMP_TLS SmpControl smp_control;
+#define smp_helper  (smp_control.is_helper)
+#define smp_nodes_pub (smp_control.nodes_pub)
 
 static inline bool smp_stop_read(void) { return __atomic_load_n(&smp_stop, __ATOMIC_RELAXED) != 0; }
 

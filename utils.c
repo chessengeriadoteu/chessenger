@@ -353,6 +353,48 @@ static int get_least_valuable_attacker(Position* pos, Bitboard attackers, Color 
     return -1;
 }
 
+static Bitboard see_attackers_both_sides(Position* pos, int square, Bitboard occupied) {
+    if (!pos || square < 0 || square > 63) return 0;
+
+    Bitboard attackers = 0;
+    const int file = square % 8;
+
+    if (square >= 16) {
+        if (file > 0 && (pos->pieces[WHITE][PAWN] & (1ULL << (square - 9)))) {
+            attackers |= (1ULL << (square - 9));
+        }
+        if (file < 7 && (pos->pieces[WHITE][PAWN] & (1ULL << (square - 7)))) {
+            attackers |= (1ULL << (square - 7));
+        }
+    }
+    if (square < 48) {
+        if (file > 0 && (pos->pieces[BLACK][PAWN] & (1ULL << (square + 7)))) {
+            attackers |= (1ULL << (square + 7));
+        }
+        if (file < 7 && (pos->pieces[BLACK][PAWN] & (1ULL << (square + 9)))) {
+            attackers |= (1ULL << (square + 9));
+        }
+    }
+
+    extern Bitboard knight_attacks[64];
+    extern Bitboard king_attacks[64];
+    attackers |= knight_attacks[square] & (pos->pieces[WHITE][KNIGHT] | pos->pieces[BLACK][KNIGHT]);
+    attackers |= king_attacks[square]   & (pos->pieces[WHITE][KING]   | pos->pieces[BLACK][KING]);
+
+    extern Bitboard get_rook_attacks_public(int square, Bitboard occupied);
+    extern Bitboard get_bishop_attacks_public(int square, Bitboard occupied);
+
+    const Bitboard rook_att = get_rook_attacks_public(square, occupied);
+    attackers |= rook_att & (pos->pieces[WHITE][ROOK] | pos->pieces[WHITE][QUEEN] |
+                             pos->pieces[BLACK][ROOK] | pos->pieces[BLACK][QUEEN]);
+
+    const Bitboard bishop_att = get_bishop_attacks_public(square, occupied);
+    attackers |= bishop_att & (pos->pieces[WHITE][BISHOP] | pos->pieces[WHITE][QUEEN] |
+                               pos->pieces[BLACK][BISHOP] | pos->pieces[BLACK][QUEEN]);
+
+    return attackers;
+}
+
 int static_exchange_evaluation(Position* pos, Move* move) {
     if (!pos || !move) return 0;
     if (move->from < 0 || move->from > 63 || move->to < 0 || move->to > 63) return 0;
@@ -398,8 +440,7 @@ int static_exchange_evaluation(Position* pos, Move* move) {
 
         gain[depth] = see_values[piece_on_target] - gain[depth - 1];
 
-        Bitboard attackers = (get_attackers_of_square(pos, target_square, WHITE, occupied) |
-                              get_attackers_of_square(pos, target_square, BLACK, occupied)) & occupied;
+        Bitboard attackers = see_attackers_both_sides(pos, target_square, occupied) & occupied;
 
         PieceType attacker_type = EMPTY;
         int attacker_square = get_least_valuable_attacker(pos, attackers, side, &attacker_type);

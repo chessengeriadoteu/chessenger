@@ -242,10 +242,10 @@ bool parse_fen(Position* pos, const char* fen) {
             }
             if (uci_chess960) {
 
-                const Color kol = (c == 'K' || c == 'Q' || (c >= 'A' && c <= 'H')) ? WHITE : BLACK;
-                const int back_rank_base = (kol == WHITE) ? 0 : 56;
-                const Bitboard kr = tmp.pieces[kol][KING] & (0xFFULL << back_rank_base);
-                const Bitboard rook_sliders = tmp.pieces[kol][ROOK] & (0xFFULL << back_rank_base);
+                const Color rights_color = (c == 'K' || c == 'Q' || (c >= 'A' && c <= 'H')) ? WHITE : BLACK;
+                const int back_rank_base = (rights_color == WHITE) ? 0 : 56;
+                const Bitboard kr = tmp.pieces[rights_color][KING] & (0xFFULL << back_rank_base);
+                const Bitboard rook_sliders = tmp.pieces[rights_color][ROOK] & (0xFFULL << back_rank_base);
                 if (!kr) continue;
                 const int ksq = get_lsb(kr);
                 int at_sq = -1;
@@ -258,7 +258,7 @@ bool parse_fen(Position* pos, const char* fen) {
                     if (s != ksq && (rook_sliders & (1ULL << s))) at_sq = s;
                 }
                 if (at_sq < 0) continue;
-                bit = (kol == WHITE) ? ((at_sq > ksq) ? WHITE_KINGSIDE : WHITE_QUEENSIDE)
+                bit = (rights_color == WHITE) ? ((at_sq > ksq) ? WHITE_KINGSIDE : WHITE_QUEENSIDE)
                                      : ((at_sq > ksq) ? BLACK_KINGSIDE : BLACK_QUEENSIDE);
                 rook_sq[__builtin_ctz(bit)] = at_sq;
             }
@@ -622,36 +622,14 @@ void undo_move_full(Position* pos, Move* move, UndoInfo* undo) {
 bool has_insufficient_material(Position* pos) {
     if (!pos) return false;
 
-    int white_pieces = 0, black_pieces = 0;
-    int white_knights = 0, black_knights = 0;
-    int white_bishops = 0, black_bishops = 0;
-
-    for (int piece = PAWN; piece <= QUEEN; piece++) {
-        white_pieces += pop_count(pos->pieces[WHITE][piece]);
-        black_pieces += pop_count(pos->pieces[BLACK][piece]);
-
-        if (piece == KNIGHT) {
-            white_knights = pop_count(pos->pieces[WHITE][KNIGHT]);
-            black_knights = pop_count(pos->pieces[BLACK][KNIGHT]);
-        } else if (piece == BISHOP) {
-            white_bishops = pop_count(pos->pieces[WHITE][BISHOP]);
-            black_bishops = pop_count(pos->pieces[BLACK][BISHOP]);
-        }
+    {
+        const Bitboard pawns_rooks_queens_bb = pos->pieces[WHITE][PAWN]  | pos->pieces[BLACK][PAWN]
+                                  | pos->pieces[WHITE][ROOK]  | pos->pieces[BLACK][ROOK]
+                                  | pos->pieces[WHITE][QUEEN] | pos->pieces[BLACK][QUEEN];
+        const Bitboard minor_pieces_bb = pos->pieces[WHITE][KNIGHT] | pos->pieces[BLACK][KNIGHT]
+                                  | pos->pieces[WHITE][BISHOP] | pos->pieces[BLACK][BISHOP];
+        return !pawns_rooks_queens_bb && !(minor_pieces_bb & (minor_pieces_bb - 1));
     }
-
-    if (white_pieces == 0 && black_pieces == 0) return true;
-
-    if ((white_pieces == 1 && white_knights == 1 && black_pieces == 0) ||
-        (black_pieces == 1 && black_knights == 1 && white_pieces == 0)) {
-        return true;
-    }
-
-    if ((white_pieces == 1 && white_bishops == 1 && black_pieces == 0) ||
-        (black_pieces == 1 && black_bishops == 1 && white_pieces == 0)) {
-        return true;
-    }
-
-    return false;
 }
 
 GameResult check_game_result(Position* pos) {
@@ -700,6 +678,13 @@ int count_position_occurrences(Position* pos, uint64_t hash) {
     }
 
     return count;
+}
+
+int count_position_occurrences_max2(Position* pos, uint64_t hash) {
+    if (!pos) return 0;
+    for (int i = pos->history_base; i < pos->history_count; i++)
+        if (pos->position_history[i] == hash) return 2;
+    return 1;
 }
 
 void add_position_to_history(Position* pos, uint64_t hash) {
