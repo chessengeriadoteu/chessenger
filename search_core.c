@@ -3,7 +3,7 @@
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
  * Copyright (C) 2004-2026 The Stockfish developers (Stockfish 19, see the AUTHORS file of Stockfish)
- * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and Stockfish 19. Modified by Dariusz Domagała, 2026-10-15.
+ * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and Stockfish 19. Modified by Dariusz Domagała, 2026-10-17.
  */
 #include "syzygy.h"
 #include "search.h"
@@ -17,6 +17,10 @@
 #include <strings.h>
 #include <stdbool.h>
 #include "tune.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include "nnue.h"
 
 #define MAX_SEARCH_PLY (MAX_DEPTH + EXT_MAX + MAX_QUIESCENCE_DEPTH)
 typedef char history_capacity_check[(HISTORY_GAME_LIMIT + 1 + MAX_SEARCH_PLY + 1 <= MAX_POSITION_HISTORY) ? 1 : -1];
@@ -188,6 +192,7 @@ typedef struct {
     int  reduced_child_at_ply[MAX_SEARCH_PLY + 2];
     int  parent_lmr_reduction[MAX_SEARCH_PLY + 2];
     int  raw_eval_at_ply[MAX_SEARCH_PLY + 2];
+    NnueThread* nnue_thread;
 } SearchThreadState;
 
 static SMP_TLS SearchThreadState thread_state;
@@ -204,6 +209,7 @@ static SMP_TLS SearchThreadState thread_state;
 #define move_stack    (thread_state.move_stack)
 #define gives_check_at_ply        (thread_state.gives_check_at_ply)
 #define double_ext_total         (thread_state.double_ext_total)
+#define nnue_thread           (thread_state.nnue_thread)
 #define cutoff_count_at_ply       (thread_state.cutoff_count_at_ply)
 #define tt_pv_at_ply         (thread_state.tt_pv_at_ply)
 #define stat_score_at_ply         (thread_state.stat_score_at_ply)
@@ -246,6 +252,10 @@ static inline uint64_t key_after_move(const Position* pos, const Move* m) {
 
 #define CAPTURE_PICK_ARG  , Color us
 #define CAPTURE_PICK_PASS , us
+
+#define NODE_EVAL(p, ply) nnue_eval_node(nnue_thread, (ply), (p))
+_Static_assert(MAX_SEARCH_PLY < NNUE_STACK_SIZE, "accumulator stack must have an entry for every search ply");
+_Static_assert(TB_WIN_ZONE == SYZYGY_WIN_SCORE - 1000, "nnue_to_search clamps to SYZYGY_WIN_SCORE - 1000 - 1 = TB_WIN_ZONE - 1");
 
 static inline uint64_t corr_pawn_key(const Position* pos) {
     uint64_t x = pos->pieces[WHITE][PAWN] ^ (pos->pieces[BLACK][PAWN] * 0x9E3779B97F4A7C15ULL);
@@ -614,7 +624,7 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
     if (fast_check_stop()) return alpha;
     if (S2_STOP) return alpha;
 
-    if (ply >= MAX_SEARCH_PLY) return FIFTY_MOVE_SCALE(pos, evaluate_position(pos));
+    if (ply >= MAX_SEARCH_PLY) return FIFTY_MOVE_SCALE(pos, NODE_EVAL(pos, ply));
 
     TTProbe    qts;
     const bool q_tt_found = tt_probe_entry(&main_tt, pos->hash, ply, &qts);
@@ -642,7 +652,7 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
         if (mat_balance_stm - QS_DELTA_BETA >= beta && !is_endgame_special(pos)) {
             int beta_filter_val;
             if (q_tt_found && qts.eval != TT_EVAL_NONE) best = qts.eval;
-            else { best = evaluate_position(pos); eval_is_fresh = 1; }
+            else { best = NODE_EVAL(pos, ply); eval_is_fresh = 1; }
             raw_eval_for_tt = best;
             { CorrSlots qk; best = corr_clamp(best + corr_compute(pos, ply, pos->to_move, &qk)); }
             beta_filter_val = best;
@@ -662,7 +672,7 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
 
         if (q_tt_found && qts.eval != TT_EVAL_NONE) best = qts.eval;
         else {
-            best = evaluate_position(pos);
+            best = NODE_EVAL(pos, ply);
             tt_store_eval(&main_tt, pos->hash, best);
         }
 
@@ -707,6 +717,7 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
             if (!is_legal_fast_pub(pos, &m, &qs_legal_ctx)) continue;
         }
         make_move_full(pos, &m, &u);
+        nnue_after_move(nnue_thread, ply + 1, pos);
         PREFETCH_AFTER_MOVE();
         info->nodes++;
         (*node_counter_ptr)++;
@@ -733,7 +744,7 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
         int qg_e;
         if (q_tt_found && qts.eval != TT_EVAL_NONE) qg_e = qts.eval;
         else {
-            qg_e = evaluate_position(pos);
+            qg_e = NODE_EVAL(pos, ply);
             tt_store_eval(&main_tt, pos->hash, qg_e);
         }
         { CorrSlots qk; qg_e = corr_clamp(qg_e + corr_compute(pos, ply, pos->to_move, &qk)); }
@@ -741,7 +752,7 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
     }
     if (best > -MATE_SCORE)
         qs_tt_store(pos, best, best >= beta ? HASH_BETA : best > qs_alpha0 ? HASH_EXACT : HASH_ALPHA, ply);
-    return best > -MATE_SCORE ? best : FIFTY_MOVE_SCALE(pos, evaluate_position(pos));
+    return best > -MATE_SCORE ? best : FIFTY_MOVE_SCALE(pos, NODE_EVAL(pos, ply));
 }
 
 #include <stdio.h>
@@ -841,7 +852,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
         if (alpha >= beta) return beta;
     }
 
-    if (ply >= MAX_SEARCH_PLY) return FIFTY_MOVE_SCALE(pos, evaluate_position(pos));
+    if (ply >= MAX_SEARCH_PLY) return FIFTY_MOVE_SCALE(pos, NODE_EVAL(pos, ply));
     double_ext_total[ply + 1] = double_ext_total[ply];
     stat_score_at_ply[ply] = 0;
     move_count_at_ply[ply]  = 0;
@@ -892,7 +903,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
     else {
         if (tt_found && tt_so.eval != TT_EVAL_NONE) eval_adj = tt_so.eval;
         else {
-            eval_adj = evaluate_position(pos);
+            eval_adj = NODE_EVAL(pos, ply);
             if (ply && !null_at_ply[ply - 1]) eval_adj -= stat_score_at_ply[ply - 1] / RED_EV_DIVISOR;
             if (!excl) tt_store_eval(&main_tt, pos->hash, eval_adj);
         }
@@ -945,6 +956,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
         TT_PF(pos->hash);
 
         null_at_ply[ply] = 1;
+        nnue_after_null(nnue_thread, ply + 1);
         w = -search_node(pos, false, d - R, ply + 1, -beta, 1 - beta, 0, NULL, info CUTNODE_PASS(!cut));
         null_at_ply[ply] = 0;
 
@@ -983,6 +995,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
                 move_stack[ply] = pm;
                 PREFETCH_BEFORE_MOVE(pm);
                 make_move_full(pos, &pm, &pu);
+                nnue_after_move(nnue_thread, ply + 1, pos);
                 PREFETCH_AFTER_MOVE();
                 pch = is_in_check(pos, pos->to_move);
                 pw  = -search_node(pos, pch, 0, ply + 1, -pcb, -pcb + 1, 1, NULL, info CUTNODE_PASS(!cut));
@@ -1192,6 +1205,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
             if (ply == 0 && !excl) uci_report_currmove(&m, ++uci_nr);
             const long long effort_nodes_before = info->nodes;
             make_move_full(pos, &m, &u);
+            nnue_after_move(nnue_thread, ply + 1, pos);
             PREFETCH_AFTER_MOVE();
             if (quiet) quiets[n_quiets++] = m;
             else tried_captures[n_tried_captures++] = m;
@@ -1202,6 +1216,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
                 undo_move_full(pos, &m, &u);
                 ext_see = (n == STAGE_HASH) ? static_exchange_evaluation(pos, &m) : LAZY_SEE();
                 make_move_full(pos, &m, &u);
+                nnue_after_move(nnue_thread, ply + 1, pos);
             }
 
             int ext_extra = 0;
@@ -1418,6 +1433,12 @@ Move search_root(Position* pos, int depth, int alpha, int beta, SearchInfo* info
     node_counter_ptr    = nodes_searched_ptr;
     root_interrupted_ptr = root_interrupted;
     *root_interrupted = false;
+
+    if (!nnue_thread && !(nnue_thread = nnue_thread_new())) {
+        fprintf(stderr, "nnue: out of memory for thread accumulators\n");
+        exit(1);
+    }
+    nnue_root(nnue_thread, pos);
     if (EFFORT_AT_ROOT) { effort_total = 0; effort_best = 0; }
 
     if (depth == 1) {

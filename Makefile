@@ -2,17 +2,17 @@
 # Copyright (C) Dariusz Domagała
 #
 # make              build for this machine with portable flags (macOS, Linux, Windows MSYS2/MinGW)
-# make release      all published binaries except 32-bit Windows into dist/ (needs zig >= 0.13 for Linux and Windows)
-# make release-x32  32-bit Windows binary into dist/ (needs zig >= 0.13)
+# make release      all published binaries except 32-bit Windows into dist/ (needs zig for Linux and Windows, tested with 0.17)
+# make release-x32  32-bit Windows binary into dist/ (needs zig, tested with 0.17)
 
 CC      ?= cc
 ZIG     ?= zig
 CFLAGS  := -std=c99 -O3 -flto -DNDEBUG -Wall -Wextra
 LDLIBS  := -lm
 ENGINE  := $(strip $(filter-out win_stdin.c,$(wildcard *.c)) $(wildcard fathom/tbprobe.c))
-VERSION := 2.9.5
+VERSION := 3.0
 # release date in the build banner (`main.c`, BUILD_DATE); only a string, search and evaluation do not read it
-BUILD_DATE := 2026-10-15
+BUILD_DATE := 2026-10-17
 CFLAGS  += '-DBUILD_DATE="$(BUILD_DATE)"'
 
 # Syzygy (version 2.0 and later): fathom/tbprobe.c is the only Fathom unit (it includes tbchess.c itself), so it is
@@ -23,6 +23,20 @@ endif
 # Lazy SMP (version 2.0 and later, smp.c): the code is compiled in only with -DSMP=1 and needs -pthread
 ifneq ($(wildcard smp.c),)
     CFLAGS += -DSMP=1 -pthread
+endif
+
+# NNUE network (version 3.0 and later): nnue.c embeds the network file with the C23 embed directive (clang 19+, gcc 15+).
+# The file must lie next to nnue.c; a missing file or a different md5 stops the build, so no binary is built without its network.
+NNUE_FILE := siec_g1_w01.bin
+NNUE_MD5  := 9cc71f559520fb91ed4ff27b593ea32c
+ifeq ($(filter clean,$(MAKECMDGOALS)),)
+    ifeq ($(wildcard $(NNUE_FILE)),)
+        $(error network file $(NNUE_FILE) is missing next to nnue.c: the build embeds it into the binary)
+    endif
+    NNUE_MD5_FILE := $(firstword $(shell md5 -q '$(NNUE_FILE)' 2>/dev/null || md5sum '$(NNUE_FILE)' 2>/dev/null))
+    ifneq ($(NNUE_MD5_FILE),$(NNUE_MD5))
+        $(error network file $(NNUE_FILE) has md5 $(NNUE_MD5_FILE), expected $(NNUE_MD5))
+    endif
 endif
 
 ifeq ($(OS),Windows_NT)
@@ -50,6 +64,7 @@ else
     endif
 endif
 
+$(EXE): $(NNUE_FILE)
 $(EXE): $(SOURCES) $(wildcard *.h fathom/*.h fathom/*.c)
 	$(CC) $(CFLAGS) $(ARCH) -o $@ $(SOURCES) $(LDLIBS)
 
@@ -84,7 +99,7 @@ release:
 # 32-bit Windows, built separately
 release-x32:
 	mkdir -p dist
-	$(ZIG) cc -target x86-windows-gnu -mcpu=i686 $(WCFLAGS) -o $(D)-windows-x32.exe $(ENGINE) $(WIN) $(LDLIBS)
+	$(ZIG) cc -target x86-windows-gnu -mcpu=pentium4 $(WCFLAGS) -o $(D)-windows-x32.exe $(ENGINE) $(WIN) $(LDLIBS)
 
 clean:
 	rm -rf $(EXE) dist $(PGO)

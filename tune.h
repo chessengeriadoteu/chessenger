@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) Dariusz Domagała
+ * Copyright (C) 2004-2026 The Stockfish developers (Stockfish 19, see the AUTHORS file of Stockfish)
+ * Portions of this file are adapted from Stockfish 19. Modified by Dariusz Domagała, 2026-10-17.
  */
 #ifndef TUNE_H
 #define TUNE_H

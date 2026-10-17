@@ -1,7 +1,7 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later
+/* SPDX-License-Identifier: GPL-3.0-or-later AND MIT
  * Copyright (C) Dariusz Domagała
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
- * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-15.
+ * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-17.
  * KPK bitbase adapted from Stash 37, whose KPK bitbase follows Stockfish's bitbase.cpp.
  */
 #include "eval.h"

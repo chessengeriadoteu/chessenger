@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) Dariusz Domagała
+ * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
+ * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-17.
  */
 #ifndef TT_H
 #define TT_H

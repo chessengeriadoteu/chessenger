@@ -1,8 +1,9 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later AND GPL-3.0-only
+/* SPDX-License-Identifier: GPL-3.0-or-later AND MIT AND GPL-3.0-only
  * Copyright (C) Dariusz Domagała
+ * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
  * Copyright (C) Sam Moore (SimpleChess 3.5.0)
- * Portions of this file are adapted from Stash 37 and SimpleChess 3.5.0. Modified by Dariusz Domagała, 2026-10-15.
+ * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and SimpleChess 3.5.0. Modified by Dariusz Domagała, 2026-10-17.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,7 @@
 #include "syzygy.h"
 #include "search.h"
 #include "tune.h"
+#include "nnue.h"
 
 #ifdef _WIN32
 #define NULL_DEVICE "NUL"
@@ -28,7 +30,7 @@
 #define NULL_DEVICE "/dev/null"
 #endif
 
-#define ENGINE_VERSION "2.9.5"
+#define ENGINE_VERSION "3.0"
 
 bool position_changed = false;
 bool stop_requested = false;
@@ -1513,6 +1515,10 @@ int main(int argc, char** argv) {
     init_tt(&main_tt, TT_HASH_MB_DEFAULT);
     init_search();
     endgame_init();
+    if (!nnue_load_embedded()) {
+        fprintf(stderr, "nnue: embedded network not loaded, engine exits\n");
+        return 1;
+    }
 
     Position pos;
     setup_starting_position(&pos);
@@ -1836,6 +1842,17 @@ int main(int argc, char** argv) {
             printf("info string eval stm %d white %d\n", eval_stm, eval_white);
             fflush(stdout);
 
+        } else if (strcmp(input, "nnue") == 0) {
+            if (nnue_ready()) {
+                int nnue_raw_eval = nnue_eval_full(&pos);
+                int nnue_scaled_eval = nnue_scale_by_material(&pos, nnue_raw_eval);
+                printf("info string nnue eval %d scaled %d\n", nnue_raw_eval, nnue_scaled_eval);
+
+                printf("info string nnue_search %d\n", nnue_to_search(nnue_scaled_eval));
+            } else {
+                printf("info string nnue no network\n");
+            }
+            fflush(stdout);
         } else if (strcmp(input, "hash") == 0) {
 
             printf("info string hash 0x%016llx\n",
