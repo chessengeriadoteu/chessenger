@@ -14,18 +14,84 @@ static int limit_uci = 7;
 static int probe_depth_uci = 1;
 static bool rule50_enabled = true;
 static bool loaded = false;
+#if TB_EMBEDDED || TB_NEXT_TO_ENGINE
+
+static bool embedded_on = false;
+static bool embedded_paused = false;
+#endif
 
 static void recompute_limit(void) {
     int n = loaded ? (int)TB_LARGEST : 0;
+#if TB_EMBEDDED || TB_NEXT_TO_ENGINE
+    if (embedded_on && embedded_paused) n = 0;
+#endif
     syzygy_limit = n < limit_uci ? n : limit_uci;
 }
+
+#if TB_EMBEDDED
+
+static void embedded_enable(void) {
+    tb_from_memory = true;
+    loaded = tb_init("(embedded)");
+    embedded_on = loaded && TB_LARGEST > 0;
+    embedded_paused = false;
+}
+#elif TB_NEXT_TO_ENGINE
+
+static char beside[1024] = "";
+static int dir_pieces = 0;
+
+void syzygy_dir_set(const char* dir_path) { snprintf(beside, sizeof(beside), "%s", dir_path ? dir_path : ""); }
+const char* syzygy_dir_info(void) { return beside; }
+int syzygy_dir_pieces(void) { return dir_pieces; }
+
+static void embedded_enable(void) {
+    loaded = tb_init(beside);
+    embedded_on = loaded && TB_LARGEST > 0;
+    dir_pieces = embedded_on ? (int)TB_LARGEST : 0;
+    embedded_paused = false;
+}
+#endif
+#if TB_EMBEDDED || TB_NEXT_TO_ENGINE
+
+void syzygy_embedded_start(void) {
+    embedded_enable();
+    recompute_limit();
+}
+
+void syzygy_embedded_pause(bool paused) {
+    embedded_paused = paused;
+    recompute_limit();
+}
+#endif
 
 void syzygy_set_path(const char* tb_path) {
 
     if (tb_path == NULL || tb_path[0] == '\0' || strcmp(tb_path, "<empty>") == 0) {
 
+#if TB_EMBEDDED
+
+        embedded_enable();
+        printf("info string SyzygyPath: built-in tablebases up to %u pieces\n", loaded ? TB_LARGEST : 0);
+        fflush(stdout);
+#elif TB_NEXT_TO_ENGINE
+
+        embedded_enable();
+        if (embedded_on)
+            printf("info string SyzygyPath: tablebases next to the engine (%s) up to %u pieces\n", beside, TB_LARGEST);
+        else
+            printf("info string SyzygyPath: no tablebases next to the engine (%s), tablebases off\n", beside);
+        fflush(stdout);
+#else
         loaded = false;
+#endif
     } else {
+#if TB_EMBEDDED
+        tb_from_memory = false;
+        embedded_on = false;
+#elif TB_NEXT_TO_ENGINE
+        embedded_on = false;
+#endif
         loaded = tb_init(tb_path);
         if (!loaded) {
             printf("info string SyzygyPath: tb_init failed for `%s`, tablebases off\n", tb_path);
@@ -41,6 +107,9 @@ void syzygy_set_path(const char* tb_path) {
 
 void syzygy_set_limit(int limit) {
     limit_uci = limit < 0 ? 0 : (limit > 7 ? 7 : limit);
+#if TB_EMBEDDED || TB_NEXT_TO_ENGINE
+    embedded_paused = false;
+#endif
     recompute_limit();
 }
 

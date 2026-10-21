@@ -90,6 +90,11 @@
 #if defined(__FreeBSD__) || defined(__NetBSD__) || \
   defined(__DragonFly__) || defined(__OpenBSD__)
 #include <sys/endian.h>
+#if defined(__OpenBSD__)
+#define bswap16(x)              __swap16(x)
+#define bswap32(x)              __swap32(x)
+#define bswap64(x)              __swap64(x)
+#endif
 #define __ENDIAN_DEFINED        1
 #define __BSWAP_DEFINED         1
 #define __HOSTSWAP_DEFINED      1

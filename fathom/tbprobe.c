@@ -293,6 +293,9 @@ static int initialized = 0;
 static int numPaths = 0;
 static char *pathString = NULL;
 static char **paths = NULL;
+#if TB_EMBEDDED
+bool tb_from_memory = false;
+#endif
 
 static FD open_tb(const char *str, const char *suffix)
 {
@@ -393,6 +396,9 @@ static void *map_file(FD fd, map_t *mapping)
 static void unmap_file(void *data, map_t size)
 {
   if (!data) return;
+#if TB_EMBEDDED
+  if (!size) return;
+#endif
   if (munmap(data, size) != 0) {
       perror("munmap");
   }
@@ -401,6 +407,9 @@ static void unmap_file(void *data, map_t size)
 static void unmap_file(void *data, map_t mapping)
 {
   if (!data) return;
+#if TB_EMBEDDED
+  if (!mapping) return;
+#endif
   if (!UnmapViewOfFile(data)) {
 	  fprintf(stderr, "unmap failed, error code %lu\n", GetLastError());
   }
@@ -685,6 +694,12 @@ static void prt_str(const Pos *pos, char *str, bool flip)
 
 static bool test_tb(const char *str, const char *suffix)
 {
+#if TB_EMBEDDED
+  if (tb_from_memory) {
+    size_t size = 0;
+    return syzygy_embedded_file(str, suffix, &size) != NULL && (size & 63) == 16;
+  }
+#endif
   FD fd = open_tb(str, suffix);
   if (fd != FD_ERR) {
     size_t size = file_size(fd);
@@ -700,6 +715,13 @@ static bool test_tb(const char *str, const char *suffix)
 
 static void *map_tb(const char *name, const char *suffix, map_t *mapping)
 {
+#if TB_EMBEDDED
+  if (tb_from_memory) {
+    size_t size = 0;
+    *mapping = (map_t)0;
+    return (void *)syzygy_embedded_file(name, suffix, &size);
+  }
+#endif
   FD fd = open_tb(name, suffix);
   if (fd == FD_ERR)
     return NULL;

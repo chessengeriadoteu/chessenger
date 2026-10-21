@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND MIT
  * Copyright (C) Dariusz Domagała
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
- * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-10-17.
+ * Portions of this file are adapted from OliThink 5.10.5. Modified by Dariusz Domagała, 2026-10-21.
  */
 #define RFP_MARGIN 150
 #include "search.h"
@@ -102,8 +102,11 @@ static bool      node_limit_reached = false;
 void reset_search_state(void) {
     stop_requested = false;
     position_changed = false;
+
+    if (!bench_queues_input) {
     has_pending_input = false;
     pending_input[0] = '\0';
+    }
 
     search_unbounded = false;
 
@@ -202,6 +205,7 @@ static bool currmove_gate_open(void) {
 }
 
 long long uci_gate_ms(void) {
+    { extern bool console_takes_search_output(void); if (console_takes_search_output()) return -1; }
     return currmove_gate_open() ? time_diff_ms(search_start_time, get_wall_time()) : -1;
 }
 
@@ -1128,14 +1132,18 @@ static void handle_line_during_search(char* line, bool* abort_now) {
         fflush(stdout);
     } else if (strncmp(line, "quit", 4) == 0) {
 
+        { extern bool console_takes_search_output(void); if (!console_takes_search_output()) {
         printf("info string quit received during search; search aborted\n");
         fflush(stdout);
+        } }
         stop_requested = true;
         *abort_now = true;
         if (!queue_pending_line(line)) {
             quit_requested = true;
         }
     } else if (strncmp(line, "stop", 4) == 0) {
+
+        { extern void console_stop_in_search(void); console_stop_in_search(); }
         stop_requested = true;
         *abort_now = true;
 
@@ -1172,6 +1180,36 @@ static void handle_line_during_search(char* line, bool* abort_now) {
         queue_pending_line(line);
     } else {
 
+        {
+            extern int xboard_line_in_search(const char* typed);
+            const int xb_line = xboard_line_in_search(line);
+            if (xb_line & 1) {
+                stop_requested = true;
+                *abort_now = true;
+            }
+            if (xb_line & 2) return;
+        }
+
+        {
+            extern int console_line_in_search(const char* typed);
+            const int con_line = console_line_in_search(line);
+            if (con_line == 2 && ponder_mode && !ponderhit_received) {
+                ponderhit_received = true;
+                if (ponder_budget_ms > 0) {
+                    set_search_unbounded(false);
+                    set_search_time_limit(ponder_budget_ms);
+                    start_search_timer();
+                } else {
+                    stop_requested = true;
+                    *abort_now = true;
+                }
+                return;
+            }
+            if (con_line != 0) {
+                stop_requested = true;
+                *abort_now = true;
+            }
+        }
         queue_pending_line(line);
     }
 }
@@ -1260,6 +1298,8 @@ __attribute__((noinline)) static bool fast_check_stop_slow(void) {
         stop_requested = true;
         abort_now = true;
     }
+
+    { extern bool console_interrupt_taken(void); if (!abort_now && console_interrupt_taken()) { stop_requested = true; abort_now = true; } }
 
     if (!abort_now) {
 #ifndef _WIN32

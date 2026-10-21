@@ -3,7 +3,7 @@
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
  * Copyright (C) 2004-2026 The Stockfish developers (Stockfish 19, see the AUTHORS file of Stockfish)
- * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and Stockfish 19. Modified by Dariusz Domagała, 2026-10-17.
+ * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and Stockfish 19. Modified by Dariusz Domagała, 2026-10-21.
  */
 #include "syzygy.h"
 #include "search.h"
@@ -253,7 +253,15 @@ static inline uint64_t key_after_move(const Position* pos, const Move* m) {
 #define CAPTURE_PICK_ARG  , Color us
 #define CAPTURE_PICK_PASS , us
 
-#define NODE_EVAL(p, ply) nnue_eval_node(nnue_thread, (ply), (p))
+#define BASIC_EG_EVAL_CAP (SYZYGY_WIN_SCORE - 1000 - 1)
+static inline int node_eval_net(Position* pos, int ply) {
+    int w;
+    if ((pos->occupied[WHITE] == pos->pieces[WHITE][KING] || pos->occupied[BLACK] == pos->pieces[BLACK][KING])
+        && eval_basic_endgame(pos, &w))
+        return w > BASIC_EG_EVAL_CAP ? BASIC_EG_EVAL_CAP : (w < -BASIC_EG_EVAL_CAP ? -BASIC_EG_EVAL_CAP : w);
+    return nnue_eval_node(nnue_thread, ply, pos);
+}
+#define NODE_EVAL(p, ply) node_eval_net((p), (ply))
 _Static_assert(MAX_SEARCH_PLY < NNUE_STACK_SIZE, "accumulator stack must have an entry for every search ply");
 _Static_assert(TB_WIN_ZONE == SYZYGY_WIN_SCORE - 1000, "nnue_to_search clamps to SYZYGY_WIN_SCORE - 1000 - 1 = TB_WIN_ZONE - 1");
 
@@ -362,7 +370,7 @@ static int            cuckoo_ready = 0;
 
 static void cuckoo_init(void) {
     static const PieceType fig[5] = { KNIGHT, BISHOP, ROOK, QUEEN, KING };
-    int c, f, a, b, step;
+    int c, f, a, b, stride;
     for (c = 0; c < 2; c++) for (f = 0; f < 5; f++) for (a = 0; a < 64; a++) for (b = a + 1; b < 64; b++) {
         int dx = (b & 7) - (a & 7), dy = (b >> 3) - (a >> 3);
         int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy, ok;
@@ -380,7 +388,7 @@ static void cuckoo_init(void) {
         k  = zobrist_pieces[c][fig[f]][a] ^ zobrist_pieces[c][fig[f]][b] ^ zobrist_side_to_move;
         r  = (unsigned short)(a | b << 6);
         ix = (unsigned)(k & 0x1FFF);
-        for (step = 0; r && step < 0x4000; step++) {
+        for (stride = 0; r && stride < 0x4000; stride++) {
             uint64_t       tk = cuckoo_key[ix];
             unsigned short tr = cuckoo_move[ix];
             cuckoo_key[ix] = k; cuckoo_move[ix] = r;
@@ -896,7 +904,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
     fs_beta0 = beta;
     if (!excl && is_no_move(tt_pv_move)) {
 
-        if (tt_found && tt_so.mv) tt_pv_move = unpack_move(tt_so.mv);
+        if (tt_found && tt_so.this_move) tt_pv_move = unpack_move(tt_so.this_move);
     }
 
     if (ch) eval_adj = -MATE_SCORE + ply;

@@ -21,6 +21,7 @@ int evaluate_position(Position* pos);
 void endgame_init(void);
 int is_endgame_special(const Position* pos);
 int scale_material_balance(const Position* pos, int balance);
+int eval_basic_endgame(Position* pos, int* result_bb);
 
 int evaluate_material(Position* pos);
 int evaluate_position_simple(Position* pos);

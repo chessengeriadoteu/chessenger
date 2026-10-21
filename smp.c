@@ -30,7 +30,7 @@ static pthread_cond_t  cv_start   = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t  cv_done  = PTHREAD_COND_INITIALIZER;
 
 static unsigned        gen        = 0;
-static unsigned        game     = 0;
+static unsigned        game_id     = 0;
 static int             active_count  = 0;
 static int             limit_id   = 0;
 static Position        shared_position;
@@ -91,8 +91,8 @@ static void* smp_thread(void* arg) {
         if (p->id > limit_id) break;
         my_gen = gen;
         Position pos = shared_position;
-        const bool new_game = (game != my_game);
-        my_game = game;
+        const bool new_game = (game_id != my_game);
+        my_game = game_id;
         pthread_mutex_unlock(&smp_mutex);
 
         if (new_game) search_new_game();
@@ -124,7 +124,7 @@ int smp_set_threads(int threads_n) {
         pthread_attr_setstacksize(&attr, SMP_STACK);
         pthread_mutex_lock(&smp_mutex);
         limit_id = wanted;
-        const unsigned gen_now = gen, game_now = game;
+        const unsigned gen_now = gen, game_now = game_id;
         pthread_mutex_unlock(&smp_mutex);
         int i;
         for (i = helper_count; i < wanted; i++) {
@@ -181,7 +181,7 @@ long long smp_helper_nodes(void) {
 
 void smp_new_game(void) {
     pthread_mutex_lock(&smp_mutex);
-    game++;
+    game_id++;
     pthread_mutex_unlock(&smp_mutex);
 }
 

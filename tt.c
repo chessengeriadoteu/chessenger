@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) Dariusz Domagała
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
- * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-17.
+ * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-21.
  */
 #include "tt.h"
 #include "utils.h"
@@ -291,13 +291,13 @@ void tt_store_eval(TranspositionTable* tt, uint64_t key, int eval) {
 
 bool tt_probe_entry(TranspositionTable* tt, uint64_t key, int ply, TTProbe* out) {
     HashEntry w;
-    if (!tt_find(tt, key, &w)) { out->result_bb = false; out->eval = TT_EVAL_NONE; out->mv = 0; return false; }
+    if (!tt_find(tt, key, &w)) { out->result_bb = false; out->eval = TT_EVAL_NONE; out->this_move = 0; return false; }
     out->flag  = tt_bound(&w);
     out->result_bb = out->flag != HASH_NONE;
     out->depth = w.depth;
     out->score = score_from_tt(w.score, ply);
     out->eval  = w.eval;
-    out->mv  = w.best_move;
+    out->this_move  = w.best_move;
     return true;
 }
 

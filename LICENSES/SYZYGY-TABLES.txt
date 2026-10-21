@@ -1,0 +1,9 @@
+Syzygy endgame tablebases for 3 and 4 pieces (tablebases/, 70 files: 35 endings x .rtbw and .rtbz, 4 346 080 bytes),
+built into the Chessenger binary.
+
+Generated with the Syzygy tablebase generator by Ronald de Man (https://github.com/syzygy1/tb).
+Files as distributed at https://tablebase.lichess.ovh/tables/standard/ (byte-identical copies).
+
+Statement of the generator's author (README of https://github.com/syzygy1/tb):
+"All tablebase files generated using this generator may be freely redistributed. In fact, those files are free of
+copyright at least under US law (following Feist ...) and under EU law (following Football Dataco ... (C-604/10))."

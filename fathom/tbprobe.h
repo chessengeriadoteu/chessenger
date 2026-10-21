@@ -180,6 +180,11 @@ bool tb_init(const char *_path);
  */
 void tb_free(void);
 
+#if TB_EMBEDDED
+extern bool tb_from_memory;
+const unsigned char *syzygy_embedded_file(const char *param_name, const char *param_suffix, size_t *param_size);
+#endif
+
 /*
  * Probe the Win-Draw-Loss (WDL) table.
  *

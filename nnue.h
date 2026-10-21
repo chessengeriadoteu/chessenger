@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) Dariusz Domagała
- * Portions of this file are adapted from Starzix 6.0 (zzzzz, WTFPL v2, see LICENSES/STARZIX-WTFPL.txt). Modified by Dariusz Domagała, 2026-10-17.
+ * Portions of this file are adapted from Starzix 6.0 (zzzzz, WTFPL v2, see LICENSES/STARZIX-WTFPL.txt). Modified by Dariusz Domagała, 2026-10-21.
  */
 #ifndef NNUE_H
 #define NNUE_H
@@ -35,10 +35,19 @@ typedef struct {
 typedef struct NnueThread {
     NnueEntry stack[NNUE_STACK_SIZE];
     NnueRefreshEntry refresh[2][2][NNUE_BUCKETS];
+#if NNUE_LIGHT
+    unsigned net_gen;
+#endif
 } NnueThread;
 
 bool nnue_load(const char* net_file);
 bool nnue_load_embedded(void);
+#if NNUE_LIGHT
+
+#define NNUE_NET_FILE "siec_g1_w01.bin"
+long nnue_net_file_size(void);
+bool nnue_set_from_buffer(const unsigned char* data_buf, size_t n, const char** reason_msg);
+#endif
 bool nnue_ready(void);
 void nnue_recompute(const Position* pos, NnueAccumulators* a);
 int nnue_eval(const NnueAccumulators* a, Color for_side);

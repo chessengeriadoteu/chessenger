@@ -3,7 +3,7 @@
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
  * Copyright (C) Sam Moore (SimpleChess 3.5.0)
- * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and SimpleChess 3.5.0. Modified by Dariusz Domagała, 2026-10-17.
+ * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and SimpleChess 3.5.0. Modified by Dariusz Domagała, 2026-10-21.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +23,9 @@
 #include "search.h"
 #include "tune.h"
 #include "nnue.h"
+#include "console.h"
+#include "levels/levels.h"
+#include "xboard.h"
 
 #ifdef _WIN32
 #define NULL_DEVICE "NUL"
@@ -30,7 +33,7 @@
 #define NULL_DEVICE "/dev/null"
 #endif
 
-#define ENGINE_VERSION "3.0"
+#define ENGINE_VERSION "3.1"
 
 bool position_changed = false;
 bool stop_requested = false;
@@ -51,6 +54,22 @@ static bool ponder_setting = false;
 
 #define MOVE_OVERHEAD_MAX 5000
 static int move_overhead_ms = 0;
+
+static bool use_nnue_setting = true;
+#if NNUE_LIGHT
+
+#define USE_NNUE_NOW (use_nnue_setting && nnue_ready())
+#else
+#define USE_NNUE_NOW use_nnue_setting
+#endif
+#if NNUE_LIGHT
+
+static char light_evalfile[MAX_UCI_LINE] = "";
+static bool light_load_pending = false;
+static char light_binary_dir[MAX_UCI_LINE] = "";
+static char light_net_source[MAX_UCI_LINE] = "";
+static char light_searched[2 * MAX_UCI_LINE] = "";
+#endif
 
 static char input_queue[MAX_UCI_LINE * 4] = "";
 static size_t input_queue_pos = 0;
@@ -141,6 +160,11 @@ static bool read_uci_line(char* out, size_t size) {
     }
 
     char tail[MAX_UCI_LINE];
+
+    if (console_editor_on()) {
+        if (!take_partial_input(tail, sizeof(tail))) tail[0] = '\0';
+        return console_edit_line(out, size, tail);
+    }
     if (take_partial_input(tail, sizeof(tail))) {
         snprintf(out, size, "%s", tail);
         size_t used = strlen(out);
@@ -155,7 +179,14 @@ static bool read_uci_line(char* out, size_t size) {
     }
 
     memset(out, 0, size);
-    if (fgets(out, (int)size, stdin) == NULL) return false;
+
+    while (fgets(out, (int)size, stdin) == NULL) {
+        const int k = console_read_interrupted(out, size);
+        if (k == 0) return false;
+        clearerr(stdin);
+        if (k == 2) return true;
+        memset(out, 0, size);
+    }
     drop_broken_line(out, size);
     return true;
 }
@@ -398,17 +429,17 @@ static void banner(FILE* f) {
     fflush(f);
 }
 
-static void bench_row(Move* mv, Position* pos, int result_bb, int depth_arg,
+static void bench_row(Move* this_move, Position* pos, int result_bb, int depth_arg,
                          struct timeval t0, long long node_count) {
     struct timeval t1 = get_wall_time();
-    double secs = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_usec - t0.tv_usec) / 1e6;
-    if (secs < 0) secs = 0;
-    bench_sec_total += secs;
+    double seconds = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_usec - t0.tv_usec) / 1e6;
+    if (seconds < 0) seconds = 0;
+    bench_sec_total += seconds;
     char r[16];
 
-    if (mv && mv->from >= 0 && mv->to >= 0 && mv->from < 64 && mv->to < 64 &&
-        mv->from != mv->to) {
-        snprintf(r, sizeof(r), "%s", move_to_string(mv));
+    if (this_move && this_move->from >= 0 && this_move->to >= 0 && this_move->from < 64 && this_move->to < 64 &&
+        this_move->from != this_move->to) {
+        snprintf(r, sizeof(r), "%s", move_to_string(this_move));
     } else {
         Move legal[256];
         int n = generate_legal_moves(pos, legal);
@@ -425,11 +456,11 @@ static void bench_row(Move* mv, Position* pos, int result_bb, int depth_arg,
     } else {
         snprintf(w, sizeof(w), "%5d cp", result_bb);
     }
-    long long nps = secs > 0 ? (long long)(node_count / secs) : 0;
+    long long nps = seconds > 0 ? (long long)(node_count / seconds) : 0;
 
     if (isatty(STDERR_FILENO)) fputs("\r\033[K", stderr);
     fprintf(stderr, "Bench #%3d: %-6s %s %3d ply %11.6f sec. %11lld nodes %10lld nps\n",
-            bench_done + 1, r, w, depth_arg, secs, node_count, nps);
+            bench_done + 1, r, w, depth_arg, seconds, node_count, nps);
     fflush(stderr);
 }
 
@@ -497,6 +528,14 @@ static bool parse_uci_int(const char* s, long* out) {
 
 void print_uci_info_multipv(int multipv_idx, int depth, int seldepth, int score,
                             long long time_ms, long long nodes, const char* pv) {
+
+    if (console_takes_search_output()) {
+        const int plies = MATE_SCORE - (score < 0 ? -score : score);
+        const bool mate = plies >= 0 && plies < MAX_DEPTH * 2;
+        console_search_info(multipv_idx, depth, seldepth, score, mate, mate ? ((plies + 1) / 2) * (score < 0 ? -1 : 1) : 0,
+                            time_ms, nodes, pv);
+        return;
+    }
     char mpv[24];
     if (multipv_idx > 0) snprintf(mpv, sizeof(mpv), " multipv %d", multipv_idx);
     else                 mpv[0] = '\0';
@@ -533,6 +572,21 @@ void print_uci_info(int depth, int seldepth, int score, long long time_ms,
 
 void print_safe_bestmove(Move* best_move, Position* pos) {
 
+    if (console_takes_search_output()) {
+        Move chosen;
+        bool have = false;
+        if (best_move && best_move->from >= 0 && best_move->to >= 0 &&
+            best_move->from < 64 && best_move->to < 64 && best_move->from != best_move->to) {
+            chosen = *best_move;
+            have = true;
+        } else if (pos) {
+            Move legal[256];
+            if (generate_legal_moves(pos, legal) > 0) { chosen = legal[0]; have = true; }
+        }
+        console_search_bestmove(have ? &chosen : NULL);
+        return;
+    }
+
     if (best_move && best_move->from >= 0 && best_move->to >= 0 &&
         best_move->from < 64 && best_move->to < 64 &&
         best_move->from != best_move->to) {
@@ -568,13 +622,14 @@ static bool extract_ponder_from_pv(const char* pv, char* out, size_t out_size) {
 
 static void emit_bestmove(Move* best_move, Position* pos, const char* pv) {
     (void)pv;
-    char ponder_move[16];
+    if (console_takes_search_output()) { print_safe_bestmove(best_move, pos); return; }
+    char ponder_mv[16];
     if (ponder_setting && best_move &&
         best_move->from >= 0 && best_move->to >= 0 &&
         best_move->from < 64 && best_move->to < 64 &&
         best_move->from != best_move->to &&
-        extract_ponder_from_pv(last_completed_pv, ponder_move, sizeof(ponder_move))) {
-        printf("bestmove %s ponder %s\n", move_to_string(best_move), ponder_move);
+        extract_ponder_from_pv(last_completed_pv, ponder_mv, sizeof(ponder_mv))) {
+        printf("bestmove %s ponder %s\n", move_to_string(best_move), ponder_mv);
         fflush(stdout);
         return;
     }
@@ -753,6 +808,7 @@ int calculate_search_time(int wtime, int btime, int winc, int binc, int movestog
         if (final_time < min_time) final_time = min_time;
     }
 
+    if (!console_takes_search_output())
     printf("info string TIME_MGMT: calculated=%dms phase=%s algorithm=%s pieces=%d move_est=%d total_time=%.1fs\n",
            final_time, phase_name, algorithm_type, total_pieces, move_number, total_time_left);
 
@@ -1058,8 +1114,18 @@ static void uci_root_change_main(const SearchInfo* info, int score, const char* 
     print_uci_info(uci_iter_depth, info->seldepth, score, t, uci_nodes_now(info), pv);
 }
 
-static void uci_report_window_bound(int depth, const SearchInfo* info, Move mv, bool is_lower_bound) {
+static void uci_report_window_bound(int depth, const SearchInfo* info, Move this_move, bool is_lower_bound) {
     if (multipv_setting > 1) return;
+
+    if (console_takes_search_output()) {
+        const int plies = MATE_SCORE - (info->score < 0 ? -info->score : info->score);
+        const bool mate = plies >= 0 && plies < MAX_DEPTH * 2;
+        const bool ok = this_move.from >= 0 && this_move.to >= 0 && this_move.from < 64 && this_move.to < 64 && this_move.from != this_move.to;
+        console_search_bound(depth, info->seldepth, info->score, mate,
+                             mate ? ((plies + 1) / 2) * (info->score < 0 ? -1 : 1) : 0, uci_nodes_now(info),
+                             ok ? &this_move : NULL, is_lower_bound);
+        return;
+    }
     long long t = uci_gate_ms();
     if (t < 0) return;
     char result_bb[32];
@@ -1071,8 +1137,8 @@ static void uci_report_window_bound(int depth, const SearchInfo* info, Move mv, 
         snprintf(result_bb, sizeof(result_bb), "cp %d", info->score);
     }
     char pv[16] = "";
-    if (mv.from >= 0 && mv.to >= 0 && mv.from < 64 && mv.to < 64 && mv.from != mv.to)
-        snprintf(pv, sizeof(pv), " pv %s", move_to_string(&mv));
+    if (this_move.from >= 0 && this_move.to >= 0 && this_move.from < 64 && this_move.to < 64 && this_move.from != this_move.to)
+        snprintf(pv, sizeof(pv), " pv %s", move_to_string(&this_move));
     long long n = uci_nodes_now(info);
     long long nps = t > 0 ? n * 1000LL / t : 0;
     printf("info depth %d seldepth %d score %s %s time %lld nodes %lld nps %lld%s\n", depth, info->seldepth, result_bb,
@@ -1180,6 +1246,7 @@ typedef struct {
 static PvLine pv_lines[MULTIPV_MAX];
 
 static void report_hashfull(void) {
+    if (console_takes_search_output()) return;
     printf("info hashfull %d\n", hashfull_tt(&main_tt));
     fflush(stdout);
 }
@@ -1504,6 +1571,269 @@ static void report_missing_go_values(const char* input) {
     }
 }
 
+void console_banner(FILE* f) { banner(f); }
+
+bool console_queued_line(char* out, size_t n) {
+    const char* q = input_queue + input_queue_pos;
+    if (*q == '\0' || n == 0) return false;
+    size_t i = 0;
+    while (q[i] != '\0' && q[i] != '\n' && i + 1 < n) { out[i] = q[i]; i++; }
+    out[i] = '\0';
+    return true;
+}
+
+bool console_option_at(int i, const char** name, char* value, size_t n, bool* known) {
+
+    static const char* const NAMES[] = {
+        "Hash", "MultiPV", "Clear Hash", "Threads", "Ponder", "Move Overhead",
+        "SyzygyPath", "SyzygyProbeLimit", "SyzygyProbeDepth", "Syzygy50MoveRule", "UCI_Chess960",
+        "Skill Level", "UCI_LimitStrength", "UCI_Elo",
+        "Use NNUE",
+#if NNUE_LIGHT
+        "EvalFile",
+#endif
+    };
+    if (i < 0 || i >= (int)(sizeof(NAMES) / sizeof(NAMES[0]))) return false;
+    const char* nm = NAMES[i];
+    *name = nm;
+    *known = true;
+    if (strcmp(nm, "Hash") == 0)
+        snprintf(value, n, "%d MB", (int)((size_t)main_tt.size * sizeof(HashEntry) / (1024 * 1024)));
+    else if (strcmp(nm, "MultiPV") == 0)       snprintf(value, n, "%d", multipv_setting);
+    else if (strcmp(nm, "Clear Hash") == 0)    snprintf(value, n, "(button)");
+    else if (strcmp(nm, "Threads") == 0)       snprintf(value, n, "%d", threads_setting);
+    else if (strcmp(nm, "Ponder") == 0)        snprintf(value, n, "%s", ponder_setting ? "true" : "false");
+    else if (strcmp(nm, "Move Overhead") == 0) snprintf(value, n, "%d ms", move_overhead_ms);
+    else if (strcmp(nm, "UCI_Chess960") == 0)  snprintf(value, n, "%s", uci_chess960 ? "true" : "false");
+    else if (strcmp(nm, "Use NNUE") == 0)      snprintf(value, n, "%s", use_nnue_setting ? "true" : "false");
+#if NNUE_LIGHT
+    else if (strcmp(nm, "EvalFile") == 0)      snprintf(value, n, "%s", light_evalfile[0] ? light_evalfile : "<empty>");
+#endif
+    else if (console_strength_value(nm, value, n)) {   }
+    else {
+        *known = false;
+        snprintf(value, n, "%s", strcmp(nm, "SyzygyPath") == 0 ? "<empty>" :
+                                 strcmp(nm, "SyzygyProbeLimit") == 0 ? "7" :
+                                 strcmp(nm, "SyzygyProbeDepth") == 0 ? "1" : "true");
+    }
+    return true;
+}
+
+int console_static_eval(Position* p, bool* network) {
+    if (nnue_ready() && !lvl_active(console_strength_game(), USE_NNUE_NOW)) {
+        *network = true;
+        return nnue_to_search(nnue_scale_by_material(p, nnue_eval_full(p)));
+    }
+    *network = false;
+    return evaluate_position(p);
+}
+
+static void strength_wait(void) {
+    static char line[MAX_UCI_LINE];
+    while (!stop_requested && !position_changed && !quit_requested && !ponderhit_seen()) {
+        if (!read_uci_line(line, sizeof(line))) {
+            quit_requested = true;
+            break;
+        }
+        trim_uci_line(line);
+        if (line[0] == '\0') continue;
+        if (strncmp(line, "stop", 4) == 0) break;
+        if (strncmp(line, "quit", 4) == 0) {
+            quit_requested = true;
+            break;
+        }
+        if (strncmp(line, "isready", 7) == 0) {
+            printf("readyok\n");
+            fflush(stdout);
+            continue;
+        }
+        if (strncmp(line, "ponderhit", 9) == 0) {
+            if (is_ponder_mode()) break;
+            printf("info string ponderhit ignored: engine is not in ponder mode\n");
+            fflush(stdout);
+            continue;
+        }
+        static char again[MAX_UCI_LINE + 2];
+        snprintf(again, sizeof(again), "%s\n", line);
+        queue_push_front(again);
+        break;
+    }
+    stop_requested = true;
+}
+
+static void lvl_wait(void) {
+    while (!stop_requested && !position_changed && !quit_requested && !ponderhit_seen()) {
+        static char wait_line[MAX_UCI_LINE];
+        if (!read_uci_line(wait_line, sizeof(wait_line))) {
+            quit_requested = true;
+            break;
+        }
+        trim_uci_line(wait_line);
+        if (wait_line[0] == '\0') continue;
+        if (strncmp(wait_line, "stop", 4) == 0) {
+            stop_requested = true;
+        } else if (strncmp(wait_line, "quit", 4) == 0) {
+            quit_requested = true;
+        } else if (strncmp(wait_line, "isready", 7) == 0) {
+            printf("readyok\n");
+            fflush(stdout);
+        } else if (strncmp(wait_line, "ponderhit", 9) == 0) {
+            if (is_ponder_mode()) {
+                printf("info string ponderhit after the depth limit was reached; returning the move\n");
+                fflush(stdout);
+                break;
+            }
+            printf("info string ponderhit ignored: engine is not in ponder mode\n");
+            fflush(stdout);
+        } else {
+            queue_input(wait_line);
+            break;
+        }
+    }
+}
+
+#if NNUE_LIGHT
+
+#if defined(__APPLE__)
+extern int _NSGetExecutablePath(char* buf_area, uint32_t* size_bytes);
+#elif defined(_WIN32)
+__declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void* module, char* buf_area, unsigned long size_bytes);
+#endif
+
+static void light_find_binary_dir(const char* argv0) {
+    char p[MAX_UCI_LINE] = "";
+#if defined(__APPLE__)
+    uint32_t n = (uint32_t)sizeof(p);
+    if (_NSGetExecutablePath(p, &n) != 0) p[0] = '\0';
+    if (p[0]) {
+        char* r = realpath(p, NULL);
+        if (r) { snprintf(p, sizeof(p), "%s", r); free(r); }
+    }
+#elif defined(__linux__)
+    const ssize_t k = readlink("/proc/self/exe", p, sizeof(p) - 1);
+    p[k > 0 ? k : 0] = '\0';
+#elif defined(_WIN32)
+    const unsigned long k = GetModuleFileNameA(NULL, p, (unsigned long)sizeof(p));
+    if (k == 0 || k >= (unsigned long)sizeof(p)) p[0] = '\0';
+#else
+    if (argv0 && strchr(argv0, '/')) {
+        char* r = realpath(argv0, NULL);
+        if (r) { snprintf(p, sizeof(p), "%s", r); free(r); }
+    }
+#endif
+    (void)argv0;
+    char* s = strrchr(p, '/');
+#ifdef _WIN32
+    char* s2 = strrchr(p, '\\');
+    if (s2 && (!s || s2 > s)) s = s2;
+#endif
+    if (s) s[1] = '\0'; else p[0] = '\0';
+    snprintf(light_binary_dir, sizeof(light_binary_dir), "%s", p);
+}
+
+static bool light_load_file(const char* tb_path, char* reason_msg, size_t n) {
+    FILE* f = fopen(tb_path, "rb");
+    if (!f) {
+        snprintf(reason_msg, n, "cannot open %s (%s)", tb_path, strerror(errno));
+        return false;
+    }
+    const long size_bytes = nnue_net_file_size();
+    unsigned char* buf_area = (unsigned char*)malloc((size_t)size_bytes + 1);
+    if (!buf_area) {
+        fclose(f);
+        snprintf(reason_msg, n, "out of memory for %s (%ld B)", tb_path, size_bytes);
+        return false;
+    }
+    const size_t n_read = fread(buf_area, 1, (size_t)size_bytes + 1, f);
+    fclose(f);
+    const char* p = NULL;
+    bool ok = false;
+    if (n_read != (size_t)size_bytes)
+        snprintf(reason_msg, n, "wrong network file size %s (%s%zu B, expected %ld B)", tb_path,
+                 n_read > (size_t)size_bytes ? "more than " : "", n_read > (size_t)size_bytes ? (size_t)size_bytes : n_read,
+                 size_bytes);
+    else if (!(ok = nnue_set_from_buffer(buf_area, n_read, &p)))
+        snprintf(reason_msg, n, "%s: %s", tb_path, p ? p : "network rejected");
+    free(buf_area);
+    if (ok) {
+        snprintf(light_net_source, sizeof(light_net_source), "%s", tb_path);
+        clear_tt(&main_tt);
+    }
+    return ok;
+}
+
+static bool light_search_default(void) {
+    char beside[2 * MAX_UCI_LINE];
+    snprintf(beside, sizeof(beside), "%s%s", light_binary_dir, NNUE_NET_FILE);
+    const char* candidate[2] = { light_binary_dir[0] ? beside : NULL, NNUE_NET_FILE };
+    light_searched[0] = '\0';
+    for (int i = 0; i < 2; i++) {
+        if (!candidate[i]) continue;
+        char reason_msg[2 * MAX_UCI_LINE];
+        if (light_load_file(candidate[i], reason_msg, sizeof(reason_msg))) return true;
+        const size_t u = strlen(light_searched);
+        snprintf(light_searched + u, sizeof(light_searched) - u, "%s%s%s", u ? "; " : "",
+                 i == 1 ? "current folder: " : "", reason_msg);
+    }
+    return false;
+}
+
+static void light_say(const char* msg_text) {
+    if (xboard_active()) printf("# %s\n", msg_text);
+    else if (console_takes_search_output()) printf("%s\n", msg_text);
+    else printf("info string %s\n", msg_text);
+    fflush(stdout);
+}
+
+static void light_no_net(void) {
+    if (nnue_ready()) return;
+    char t[3 * MAX_UCI_LINE];
+    snprintf(t, sizeof(t), "no network loaded (%s): classic evaluation, one thread; set EvalFile or put %s next to the engine",
+             light_searched[0] ? light_searched : "not searched", NNUE_NET_FILE);
+    light_say(t);
+}
+
+static void light_before_search(void) {
+    if (light_load_pending) {
+        light_load_pending = false;
+        const bool had_net = nnue_ready();
+        char t[3 * MAX_UCI_LINE];
+        if (light_evalfile[0]) {
+            char reason_msg[2 * MAX_UCI_LINE];
+            if (light_load_file(light_evalfile, reason_msg, sizeof(reason_msg))) {
+                snprintf(t, sizeof(t), "EvalFile: network %s loaded", light_net_source);
+            } else {
+                snprintf(t, sizeof(t), "EvalFile: %s, %s", reason_msg,
+                         had_net ? "previous network kept" : "no previous network");
+                if (!had_net) snprintf(light_searched, sizeof(light_searched), "EvalFile %s", reason_msg);
+            }
+        } else if (light_search_default()) {
+            snprintf(t, sizeof(t), "EvalFile <empty>: network %s loaded", light_net_source);
+        } else {
+            snprintf(t, sizeof(t), "EvalFile <empty>: %s, %s", light_searched,
+                     had_net ? "previous network kept" : "no previous network");
+        }
+        light_say(t);
+    }
+    light_no_net();
+}
+
+static void light_start(const char* argv0) {
+    light_find_binary_dir(argv0);
+#if TB_NEXT_TO_ENGINE
+    char tb[2 * MAX_UCI_LINE];
+    snprintf(tb, sizeof(tb), "%stablebases", light_binary_dir[0] ? light_binary_dir : "");
+    syzygy_dir_set(tb);
+#endif
+    if (!light_search_default()) {
+        fprintf(stderr, "chessenger: no network %s (%s): classic evaluation, one thread; "
+                        "put %s next to the engine or set the UCI option EvalFile\n",
+                NNUE_NET_FILE, light_searched, NNUE_NET_FILE);
+        fflush(stderr);
+    }
+}
+#endif
+
 int main(int argc, char** argv) {
 
     setvbuf(stdin, NULL, _IONBF, 0);
@@ -1515,10 +1845,14 @@ int main(int argc, char** argv) {
     init_tt(&main_tt, TT_HASH_MB_DEFAULT);
     init_search();
     endgame_init();
+#if !NNUE_LIGHT
     if (!nnue_load_embedded()) {
         fprintf(stderr, "nnue: embedded network not loaded, engine exits\n");
         return 1;
     }
+#else
+    light_start(argc > 0 ? argv[0] : NULL);
+#endif
 
     Position pos;
     setup_starting_position(&pos);
@@ -1527,20 +1861,52 @@ int main(int argc, char** argv) {
 
     bool uci_announced = false;
 
+#if TB_EMBEDDED || TB_NEXT_TO_ENGINE
+
+    syzygy_embedded_start();
+#endif
+    int console_cl = 0;
     if (argc > 1 && strcmp(argv[1], "bench") == 0) {
         snprintf(input, sizeof(input), "bench %s\n", argc > 2 ? argv[2] : "");
         queue_input(input);
         bench_from_cmdline = true;
 
         if (!freopen(NULL_DEVICE, "w", stdout)) return 1;
+    } else if ((console_cl = console_command_line(argc, argv, &pos)) != 0) {
+
+        if (console_cl == 2) { free_tt(&main_tt); return 0; }
     } else if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
 
         banner(stdout);
+        console_banner_hint();
     }
 
-    while (read_uci_line(input, sizeof(input))) {
+    bool console_own = false;
+    while ((console_own = (console_before_read(&pos, input, sizeof(input)) || xboard_before_read(&pos, input, sizeof(input))))
+           || read_uci_line(input, sizeof(input))) {
 
         trim_uci_line(input);
+
+        if (console_own) {
+
+        } else if (xboard_active()) {
+
+            if (xboard_handle_line(&pos, input, sizeof(input)) == XBOARD_QUIT) break;
+            continue;
+        } else if (console_active()) {
+            ConsoleAction ca = console_handle_line(&pos, input, sizeof(input));
+            if (ca == CONSOLE_DONE) continue;
+            if (ca == CONSOLE_QUIT) break;
+        } else if (strcmp(input, "help") == 0) {
+            console_uci_help();
+            continue;
+        } else if (strcmp(input, "console") == 0) {
+            console_enter(&pos);
+            continue;
+        } else if (strcmp(input, "xboard") == 0) {
+            xboard_enter();
+            continue;
+        }
 
         if (strcmp(input, "ucinewgame") == 0) {
             setup_starting_position(&pos);
@@ -1556,6 +1922,7 @@ int main(int argc, char** argv) {
                 search_new_game();
             }
             smp_new_game();
+            lvl_new_game();
             position_desync = false; position_desync_reason[0] = '\0';
         } else if (strcmp(input, "uci") == 0) {
 
@@ -1583,11 +1950,30 @@ int main(int argc, char** argv) {
             printf("option name Syzygy50MoveRule type check default true\n");
 
             printf("option name UCI_Chess960 type check default false\n");
+            console_strength_uci_options();
+            printf("option name Use NNUE type check default true\n");
+#if NNUE_LIGHT
+            printf("option name EvalFile type string default <empty>\n");
+#endif
             printf("uciok\n");
             fflush(stdout);
             uci_announced = true;
+#if NNUE_LIGHT
+
+            light_no_net();
+#if TB_NEXT_TO_ENGINE
+            if (syzygy_dir_pieces() == 0) {
+                printf("info string no tablebases next to the engine (%s): set SyzygyPath to use Syzygy tablebases\n",
+                       syzygy_dir_info());
+                fflush(stdout);
+            }
+#endif
+#endif
 
         } else if (strncmp(input, "isready", 7) == 0) {
+#if NNUE_LIGHT
+            light_before_search();
+#endif
             printf("readyok\n");
             fflush(stdout);
 
@@ -1602,6 +1988,7 @@ int main(int argc, char** argv) {
             char opt_value[MAX_UCI_LINE];
             bool opt_ok = parse_setoption(input, opt_name, sizeof(opt_name),
                                                  opt_value, sizeof(opt_value));
+            if (opt_ok) console_note_option(opt_name, opt_value);
             long want_l = 0;
 
             if (opt_ok && strcasecmp(opt_name, "Hash") == 0) {
@@ -1758,6 +2145,38 @@ int main(int argc, char** argv) {
                            "option ignored\n", opt_value);
                 }
                 fflush(stdout);
+            } else if (opt_ok && console_strength_setoption(opt_name, opt_value)) {
+                fflush(stdout);
+            } else if (opt_ok && strcasecmp(opt_name, "Use NNUE") == 0) {
+
+                if (opt_value[0] == '\0') {
+                    printf("info string setoption Use NNUE: missing value, option ignored\n");
+                } else if (strcmp(opt_value, "true") == 0) {
+                    use_nnue_setting = true;
+#if NNUE_LIGHT
+                    if (!nnue_ready())
+                        printf("info string Use NNUE true: no network loaded, classic evaluation stays (one thread); "
+                               "set EvalFile or put %s next to the engine\n", NNUE_NET_FILE);
+                    else
+#endif
+                    printf("info string Use NNUE true\n");
+                } else if (strcmp(opt_value, "false") == 0) {
+                    use_nnue_setting = false;
+                    printf("info string Use NNUE false (classic evaluation, one thread)\n");
+                } else {
+                    printf("info string setoption Use NNUE: value `%s` is neither "
+                           "`true` nor `false`, option ignored\n", opt_value);
+                }
+                fflush(stdout);
+#if NNUE_LIGHT
+            } else if (opt_ok && strcasecmp(opt_name, "EvalFile") == 0) {
+
+                const bool is_empty = opt_value[0] == '\0' || strcmp(opt_value, "<empty>") == 0;
+                snprintf(light_evalfile, sizeof(light_evalfile), "%s", is_empty ? "" : opt_value);
+                light_load_pending = true;
+                printf("info string EvalFile %s: loaded at the next isready or go\n", is_empty ? "<empty>" : light_evalfile);
+                fflush(stdout);
+#endif
             } else if (opt_ok) {
 
                 printf("info string setoption %s: UNKNOWN option, ignored\n", opt_name);
@@ -1859,9 +2278,17 @@ int main(int argc, char** argv) {
                    (unsigned long long)compute_hash(&pos));
             fflush(stdout);
 
-        } else if (strncmp(input, "go", 2) == 0) {
+        } else if (strncmp(input, "go", 2) == 0 && (input[2] == '\0' || input[2] == ' ' || input[2] == '\t')) {
+
+#if NNUE_LIGHT
+            light_before_search();
+#endif
 
             if (position_desync) {
+                if (console_takes_search_output()) {
+                    console_search_refused(position_desync_reason);
+                    continue;
+                }
                 printf("info string ERROR: position invalid (%s); refusing to move "
                        "until a valid position command arrives\n", position_desync_reason);
                 printf("bestmove 0000\n");
@@ -1881,6 +2308,13 @@ int main(int argc, char** argv) {
 
             reset_search_state();
 
+#if TB_EMBEDDED || TB_NEXT_TO_ENGINE
+
+            syzygy_embedded_pause(bench_active || lvl_active(console_strength_go(bench_active), true));
+#endif
+
+            const bool lvl_now = lvl_active(console_strength_go(bench_active), USE_NNUE_NOW);
+            if (!lvl_now) lvl_main_buffer();
             main_tt.age++;
 
             bool ponder_req = go_has_token(input, "ponder");
@@ -1896,18 +2330,73 @@ int main(int argc, char** argv) {
                 if (tb_count > 0) {
                     for (int i = 0; i < tb_count; i++) root_included[i] = tb_list[i];
                     root_included_count = tb_count;
+                    if (!console_takes_search_output())
                     printf("info string syzygy root: %s, %d move(s)\n",
                            tb_wdl > 0 ? "win" : tb_wdl < 0 ? "loss" : "draw", tb_count);
                     fflush(stdout);
                 }
             }
             set_node_limit(parse_nodes_ll(input));
+            if (lvl_now) {
+
+                LevelGo pg;
+                memset(&pg, 0, sizeof(pg));
+                pg.infinite      = strstr(input, "infinite") != NULL;
+                pg.ponder        = ponder_req;
+                pg.has_movetime = strstr(input, "movetime") != NULL;
+                pg.movetime      = pg.has_movetime ? parse_movetime(input) : 0;
+                pg.has_clock         = strstr(input, "wtime") != NULL || strstr(input, "btime") != NULL;
+                pg.wtime         = parse_wtime(input);
+                pg.btime         = parse_btime(input);
+                pg.winc          = parse_winc(input);
+                pg.binc          = parse_binc(input);
+                pg.movestogo     = parse_movestogo(input);
+                pg.has_depth      = go_has_token(input, "depth");
+                pg.depth         = parse_depth(input);
+                pg.mate          = parse_mate(input);
+                pg.nodes         = parse_nodes_ll(input);
+                pg.multipv       = multipv_setting;
+                pg.overhead_ms     = move_overhead_ms;
+                if (go_has_token(input, "mate") && (pg.infinite || ponder_req || pg.has_movetime || pg.has_clock)) {
+                    if (!console_takes_search_output())
+                        printf("info string go mate: the mate limit works in this engine ONLY "
+                               "without time control and without `infinite`; ignored here\n");
+                    fflush(stdout);
+                }
+                if (pg.infinite || ponder_req) pg.stop_pending = take_stop_for_this_go();
+                LevelResult pw;
+                lvl_go(&pos, &pg, &pw);
+                if (pw.must_wait) {
+
+                    if (pw.level_done && !quit_requested && !pg.stop_pending) {
+                        stop_requested = false;
+                        drain_search_input();
+                        strength_wait();
+                    }
+                    lvl_wait();
+                }
+                lvl_pick_move(&pos, &pw);
+                snprintf(last_completed_pv, sizeof(last_completed_pv), "%s", pw.pv);
+                if (pw.depth_mode) {
+                    go_depth_nodes_sum += pw.node_count;
+                    if (bench_active)
+                        bench_row(&pw.this_move, &pos, pw.eval_value, pw.depth_arg, pw.start, pw.go_nodes);
+                    print_safe_bestmove(&pw.this_move, &pos);
+                } else {
+                    emit_bestmove(pw.this_move.from != pw.this_move.to ? &pw.this_move : NULL, &pos, pw.pv);
+                }
+                if (pw.must_wait) set_ponder_mode(false, 0);
+                drain_search_input();
+                if (quit_requested) break;
+                continue;
+            }
 
             smp_start(&pos, multipv_setting);
 
             if (go_has_token(input, "mate") &&
                 (strstr(input, "infinite") || ponder_req || strstr(input, "movetime") ||
                  strstr(input, "wtime") || strstr(input, "btime"))) {
+                if (!console_takes_search_output())
                 printf("info string go mate: the mate limit works in this engine ONLY "
                        "without time control and without `infinite`; ignored here\n");
                 fflush(stdout);
@@ -1932,6 +2421,7 @@ int main(int argc, char** argv) {
                                                        parse_movestogo(input), pos.to_move, &pos);
                     }
                     set_ponder_mode(true, go_budget_ms);
+                    if (!console_takes_search_output())
                     printf("info string ponder: searching on the opponent's time; "
                            "budget after `ponderhit` = %lld ms\n", go_budget_ms);
                     fflush(stdout);
@@ -2024,6 +2514,7 @@ int main(int argc, char** argv) {
             } else if (strstr(input, "movetime")) {
 
                 int movetime = parse_movetime(input);
+                if (!console_takes_search_output())
                 printf("info string TIME_DEBUG: movetime=%dms\n", movetime);
 
                 SearchInfo info = {0};
@@ -2060,22 +2551,24 @@ int main(int argc, char** argv) {
                 int depth_target = parse_depth(input);
 
                 const bool has_depth   = go_has_token(input, "depth");
-                const int  mate_target   = parse_mate(input);
+                const int  mate_goal   = parse_mate(input);
                 const long long nodes_target = parse_nodes_ll(input);
                 bool mate_found  = false;
 
-                if (!has_depth && mate_target > 0) {
+                if (!has_depth && mate_goal > 0) {
 
-                    int target_depth = 2 * mate_target - 1;
+                    int target_depth = 2 * mate_goal - 1;
                     if (target_depth > MAX_DEPTH) target_depth = MAX_DEPTH;
                     if (target_depth < 1) target_depth = 1;
                     depth_target = target_depth;
+                    if (!console_takes_search_output())
                     printf("info string go mate %d: searching to depth %d plies\n",
-                           mate_target, depth_target);
+                           mate_goal, depth_target);
                     fflush(stdout);
                 } else if (!has_depth && nodes_target > 0) {
 
                     depth_target = MAX_DEPTH;
+                    if (!console_takes_search_output())
                     printf("info string go nodes %lld: deepening to %d, the node budget is the limit\n",
                            nodes_target, MAX_DEPTH);
                     fflush(stdout);
@@ -2129,11 +2622,12 @@ int main(int argc, char** argv) {
                                     info.score, info.pv, elapsed_iter, search_start,
                                     &nodes_total);
 
-                    if (mate_target > 0 && info.score > 0) {
+                    if (mate_goal > 0 && info.score > 0) {
                         int mate_plies = MATE_SCORE - info.score;
-                        if (mate_plies >= 0 && mate_plies <= 2 * mate_target - 1) {
+                        if (mate_plies >= 0 && mate_plies <= 2 * mate_goal - 1) {
+                            if (!console_takes_search_output())
                             printf("info string go mate %d: mate found, %d moves, "
-                                   "depth %d\n", mate_target, (mate_plies + 1) / 2, depth);
+                                   "depth %d\n", mate_goal, (mate_plies + 1) / 2, depth);
                             fflush(stdout);
                             mate_found = true;
                             break;
@@ -2154,22 +2648,26 @@ int main(int argc, char** argv) {
                 if (elapsed < 1) elapsed = 1;
 
                 if (nodes_target > 0 && node_limit_hit()) {
+                    if (!console_takes_search_output())
                     printf("info string go nodes: budget %lld, searched %lld, "
                            "deepest completed depth %d\n",
                            nodes_target, SMP_NODES(get_nodes_searched()), last_completed_depth);
                     fflush(stdout);
                 }
 
-                if (mate_target > 0 && !mate_found) {
+                if (mate_goal > 0 && !mate_found) {
+                    if (!console_takes_search_output())
                     printf("info string go mate %d: no mate found up to depth %d; "
                            "this is NOT a proof that no mate exists (the search prunes)\n",
-                           mate_target, depth_target);
+                           mate_goal, depth_target);
                     fflush(stdout);
                 }
 
                 bool search_aborted = stop_requested || position_changed || quit_requested;
 
-                if (search_aborted) {
+                if (search_aborted
+                    && !console_takes_search_output()
+                    ) {
                     if (last_completed_depth == 0) {
                         printf("info string search aborted at depth %d after %lld ms; "
                                "no depth completed, result not reported\n",
@@ -2192,6 +2690,24 @@ int main(int argc, char** argv) {
             drain_search_input();
             if (quit_requested) break;
 
+        } else if (strcmp(input, "bench levels") == 0) {
+
+            fflush(stdout);
+            int lvl_null_fd = open(NULL_DEVICE, O_WRONLY);
+            int lvl_stdout_copy = lvl_null_fd >= 0 ? dup(STDOUT_FILENO) : -1;
+            if (lvl_stdout_copy >= 0) dup2(lvl_null_fd, STDOUT_FILENO);
+            if (lvl_null_fd >= 0) close(lvl_null_fd);
+#if TB_EMBEDDED || TB_NEXT_TO_ENGINE
+            syzygy_embedded_pause(true);
+#endif
+
+            bench_queues_input = true;
+            lvl_bench(BENCH_FEN, BENCH_N);
+            bench_queues_input = false;
+            fflush(stdout);
+            if (lvl_stdout_copy >= 0) { dup2(lvl_stdout_copy, STDOUT_FILENO); close(lvl_stdout_copy); }
+            drain_search_input();
+            if (quit_requested) break;
         } else if (strcmp(input, "bench") == 0 || strncmp(input, "bench ", 6) == 0) {
             bench_start(input);
 

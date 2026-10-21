@@ -41,7 +41,7 @@ int generate_legal_noisy(Position* pos, Move* moves);
 #define LEGALITY_BUF_BYTES 256
 typedef union { unsigned char b[LEGALITY_BUF_BYTES]; unsigned long long align; } LegalityBuffer;
 void legality_context_init_pub(Position* pos, LegalityBuffer* buf_area);
-bool is_legal_fast_pub(Position* pos, Move* mv, const LegalityBuffer* buf_area);
+bool is_legal_fast_pub(Position* pos, Move* this_move, const LegalityBuffer* buf_area);
 
 int generate_check_evasions(Position* pos, Move* moves);
 int generate_legal_evasions(Position* pos, Move* moves);

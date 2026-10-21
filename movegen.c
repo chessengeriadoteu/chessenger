@@ -529,9 +529,9 @@ static int generate_castling_moves_960(Position* pos, Move* moves, int move_coun
                              & ~((1ULL << ksq) | (1ULL << rsq));
         if (pos->all_pieces & empty_squares) continue;
         bool path_clear = true;
-        const int step = (king_to > ksq) ? 1 : -1;
+        const int stride = (king_to > ksq) ? 1 : -1;
         for (int s = ksq; s != king_to && path_clear; ) {
-            s += step;
+            s += stride;
             if (is_square_attacked(pos, s, them)) path_clear = false;
         }
         if (path_clear && move_count < MAX_MOVES - 1)
@@ -764,22 +764,22 @@ static void legality_context_init(Position* pos, LegalityContext* k) {
     }
 }
 
-static bool is_legal_fast(Position* pos, Move* mv, const LegalityContext* k) {
-    if (!k->usable)                        return is_legal_move(pos, mv);
-    if (mv->is_en_passant || mv->is_castling) return is_legal_move(pos, mv);
+static bool is_legal_fast(Position* pos, Move* this_move, const LegalityContext* k) {
+    if (!k->usable)                        return is_legal_move(pos, this_move);
+    if (this_move->is_en_passant || this_move->is_castling) return is_legal_move(pos, this_move);
 
-    if (mv->from == k->king_sq_idx) {
+    if (this_move->from == k->king_sq_idx) {
         const Bitboard occ_no_king = pos->all_pieces ^ (1ULL << k->king_sq_idx);
-        return !square_attacked_occ(pos, mv->to, k->opp_color, occ_no_king);
+        return !square_attacked_occ(pos, this_move->to, k->opp_color, occ_no_king);
     }
 
     if (k->num_checkers > 1)                     return false;
-    if (!((1ULL << mv->to) & k->target_bb))            return false;
+    if (!((1ULL << this_move->to) & k->target_bb))            return false;
 
-    if ((1ULL << mv->from) & k->pinned_bb) {
+    if ((1ULL << this_move->from) & k->pinned_bb) {
         for (int i = 0; i < k->num_pinned; i++) {
-            if (k->pinned_sq[i] == mv->from)
-                return (k->pin_ray[i] & (1ULL << mv->to)) != 0;
+            if (k->pinned_sq[i] == this_move->from)
+                return (k->pin_ray[i] & (1ULL << this_move->to)) != 0;
         }
         return false;
     }
@@ -791,8 +791,8 @@ void legality_context_init_pub(Position* pos, LegalityBuffer* buf_area) {
     (void)sizeof(legality_buf_size_check);
     legality_context_init(pos, (LegalityContext*)buf_area);
 }
-bool is_legal_fast_pub(Position* pos, Move* mv, const LegalityBuffer* buf_area) {
-    return is_legal_fast(pos, mv, (const LegalityContext*)buf_area);
+bool is_legal_fast_pub(Position* pos, Move* this_move, const LegalityBuffer* buf_area) {
+    return is_legal_fast(pos, this_move, (const LegalityContext*)buf_area);
 }
 
 int generate_moves(Position* pos, Move* moves) {

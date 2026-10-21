@@ -46,12 +46,12 @@ void recompute_material(Position* pos) {
     int balance = 0;
     int phase_sum   = 0;
     for (Color color = WHITE; color <= BLACK; color++) {
-        const int sign = (color == WHITE) ? 1 : -1;
-        balance += sign * __builtin_popcountll(pos->pieces[color][PAWN])   * MATERIAL_VALUE(PAWN);
-        balance += sign * __builtin_popcountll(pos->pieces[color][ROOK])   * MATERIAL_VALUE(ROOK);
-        balance += sign * __builtin_popcountll(pos->pieces[color][KNIGHT]) * MATERIAL_VALUE(KNIGHT);
-        balance += sign * __builtin_popcountll(pos->pieces[color][BISHOP]) * MATERIAL_VALUE(BISHOP);
-        balance += sign * __builtin_popcountll(pos->pieces[color][QUEEN])  * MATERIAL_VALUE(QUEEN);
+        const int side_sign = (color == WHITE) ? 1 : -1;
+        balance += side_sign * __builtin_popcountll(pos->pieces[color][PAWN])   * MATERIAL_VALUE(PAWN);
+        balance += side_sign * __builtin_popcountll(pos->pieces[color][ROOK])   * MATERIAL_VALUE(ROOK);
+        balance += side_sign * __builtin_popcountll(pos->pieces[color][KNIGHT]) * MATERIAL_VALUE(KNIGHT);
+        balance += side_sign * __builtin_popcountll(pos->pieces[color][BISHOP]) * MATERIAL_VALUE(BISHOP);
+        balance += side_sign * __builtin_popcountll(pos->pieces[color][QUEEN])  * MATERIAL_VALUE(QUEEN);
         phase_sum   += __builtin_popcountll(pos->pieces[color][QUEEN])  * 9;
         phase_sum   += __builtin_popcountll(pos->pieces[color][ROOK])   * 5;
         phase_sum   += __builtin_popcountll(pos->pieces[color][BISHOP]) * 3;
@@ -261,6 +261,12 @@ bool parse_fen(Position* pos, const char* fen) {
                 bit = (rights_color == WHITE) ? ((at_sq > ksq) ? WHITE_KINGSIDE : WHITE_QUEENSIDE)
                                      : ((at_sq > ksq) ? BLACK_KINGSIDE : BLACK_QUEENSIDE);
                 rook_sq[__builtin_ctz(bit)] = at_sq;
+            } else {
+
+                const Color rights_color = (bit & (WHITE_KINGSIDE | WHITE_QUEENSIDE)) ? WHITE : BLACK;
+                const int king_home_sq = (rights_color == WHITE) ? 4 : 60;
+                if (!(tmp.pieces[rights_color][KING] & (1ULL << king_home_sq)) ||
+                    !(tmp.pieces[rights_color][ROOK] & (1ULL << rook_sq[__builtin_ctz(bit)]))) continue;
             }
             if (tmp.castling_rights & bit) {
                 return fen_fail("FEN castling field repeats a right");
@@ -283,6 +289,18 @@ bool parse_fen(Position* pos, const char* fen) {
             return fen_fail("FEN en passant square must be on rank 3 or 6");
         }
         tmp.en_passant_square = (ep_rank - '1') * 8 + (ep_file - 'a');
+        if (!uci_chess960) {
+
+            const int ep = tmp.en_passant_square;
+            const bool rank_ok = (tmp.to_move == WHITE) ? (ep_rank == '6') : (ep_rank == '3');
+            const int pawn_bit = (tmp.to_move == WHITE) ? ep - 8 : ep + 8;
+            const int pawn_from_sq = (tmp.to_move == WHITE) ? ep + 8 : ep - 8;
+            const Color opponent = (tmp.to_move == WHITE) ? BLACK : WHITE;
+            if (!rank_ok || !(tmp.pieces[opponent][PAWN] & (1ULL << pawn_bit)) ||
+                (tmp.all_pieces & ((1ULL << ep) | (1ULL << pawn_from_sq)))) {
+                tmp.en_passant_square = -1;
+            }
+        }
     }
 
     tmp.halfmove_clock = 0;
