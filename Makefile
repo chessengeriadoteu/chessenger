@@ -2,7 +2,7 @@
 # Copyright (C) Dariusz Domagała
 #
 # make              build for this machine with portable flags (macOS, Linux, Windows MSYS2/MinGW)
-# make release      all published binaries except 32-bit Windows into dist/ (needs zig for Linux and Windows, tested with 0.17)
+# make release      all published binaries except 32-bit Windows and windows-arm64-pgo (built outside make, see below) into dist/ (needs zig for Linux and Windows, tested with 0.17)
 # make release-x32  32-bit Windows binary into dist/ (needs zig, tested with 0.17)
 # make release also needs Homebrew LLVM (LLVM_BIN, the LLVM version of zig's clang) for the Linux binaries with PGO
 
@@ -20,11 +20,11 @@ BUILD_DATE := 2026-10-21
 CFLAGS  += '-DBUILD_DATE="$(BUILD_DATE)"'
 
 # Syzygy (version 2.0 and later): fathom/tbprobe.c is the only Fathom unit (it includes tbchess.c itself), so it is
-# listed by name, not by fathom/*.c. It trips -Wsign-compare under -Wextra (tbprobe.c:2466, third-party code, left unchanged).
+# listed by name, not by fathom/*.c. It trips -Wsign-compare under -Wextra (tbprobe.c, third-party code, left unchanged).
 ifneq ($(wildcard fathom/tbprobe.c),)
     CFLAGS += -Wno-sign-compare
 endif
-# Lazy SMP (version 2.0 and later, smp.c): the code is compiled in only with -DSMP=1 and needs -pthread
+# Lazy SMP (version 2.0 and later, smp.c): the code is always compiled in and needs -pthread; the Makefile also passes -DSMP=1, which no source file reads
 ifneq ($(wildcard smp.c),)
     CFLAGS += -DSMP=1 -pthread
 endif

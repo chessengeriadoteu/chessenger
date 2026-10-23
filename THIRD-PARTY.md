@@ -53,7 +53,8 @@ the license text is. Each adapted source file also says so in its header.
 - Authors: Ronald de Man (2013-2018), basil00 (2015), Jon Dart (2016-2023)
 - License: MIT, text in `fathom/LICENSE` (the same text is in `LICENSES/FATHOM-MIT.txt`, which the binary archives carry)
 - What: the Syzygy tablebase probing code, with small changes: `tb_probe_wdl` and `tb_probe_root` are `static inline` in
-  `tbprobe.h`, `tbprobe.c` can read the tablebases built into the binary from memory, and `stdendian.h` maps the byte swap
+  `tbprobe.h`, `tbprobe.c` can read the tablebases built into the binary from memory and, on Windows, converts a file name
+  from UTF-8 to UTF-16 before opening it (`MultiByteToWideChar`, `CreateFileW`), and `stdendian.h` maps the byte swap
   functions to the ones OpenBSD has
 - Files: `fathom/tbprobe.c`, `fathom/tbprobe.h`, `fathom/tbchess.c`, `fathom/tbconfig.h`, `fathom/stdendian.h`
 

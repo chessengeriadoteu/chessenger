@@ -580,7 +580,7 @@ brew install zig llvm@22
 
 **Build**
 
-macOS, Linux and Windows binaries into `dist/` (the macOS and Linux ones with PGO):
+macOS, Linux and Windows binaries into `dist/` (the macOS and Linux ones with PGO, except `macos-x64-avx2`; the Windows ones without):
 
 ```
 make release
