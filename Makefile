@@ -14,9 +14,9 @@ ENGINE  := $(strip $(filter-out win_stdin.c,$(sort $(wildcard *.c))) $(wildcard 
 # Playing levels (version 3.1 and later): levels/levels.c is the only unit of the folder levels/ (it includes the
 # other files there itself), so it is listed by name, not by levels/*.c.
 ENGINE  += levels/levels.c
-VERSION := 3.1
+VERSION := 3.6
 # release date in the build banner (`main.c`, BUILD_DATE); only a string, search and evaluation do not read it
-BUILD_DATE := 2026-10-21
+BUILD_DATE := 2026-11-01
 CFLAGS  += '-DBUILD_DATE="$(BUILD_DATE)"'
 
 # Syzygy (version 2.0 and later): fathom/tbprobe.c is the only Fathom unit (it includes tbchess.c itself), so it is
@@ -30,9 +30,9 @@ ifneq ($(wildcard smp.c),)
 endif
 
 # Light binary (version 3.1 and later): `make LIGHT=1` builds without the network and without the tablebases inside.
-# The engine reads the network file siec_g1_w01.bin from the UCI option EvalFile, from its own folder or from the current
+# The engine reads the network file net_t80_s936.bin from the UCI option EvalFile, from its own folder or from the current
 # folder, and the Syzygy tablebases from the folder tablebases/ next to it (or from SyzygyPath). Without a network it plays
-# on the classic evaluation (one thread) and says so. Neither siec_g1_w01.bin nor tablebases/ is needed to build it; the
+# on the classic evaluation (one thread) and says so. Neither net_t80_s936.bin nor tablebases/ is needed to build it; the
 # binaries get the suffix -light. When switching LIGHT run `make clean` first: make does not track CFLAGS.
 LIGHT ?= 0
 ifeq ($(LIGHT),1)
@@ -44,8 +44,8 @@ ifeq ($(LIGHT),1)
 endif
 # NNUE network (version 3.0 and later): nnue.c embeds the network file with the C23 embed directive (clang 19+, gcc 15+).
 # The file must lie next to nnue.c; a missing file or a different md5 stops the build, so no binary is built without its network.
-NNUE_FILE := siec_g1_w01.bin
-NNUE_MD5  := 9cc71f559520fb91ed4ff27b593ea32c
+NNUE_FILE := net_t80_s936.bin
+NNUE_MD5  := 47bf96d30f431242b514be9e76593d10
 ifneq ($(LIGHT),1)
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
     ifeq ($(wildcard $(NNUE_FILE)),)

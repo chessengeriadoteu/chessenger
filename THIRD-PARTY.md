@@ -1,8 +1,8 @@
-# Third-party code and data in Chessenger 3.1
+# Third-party code and data in Chessenger 3.6
 
 Chessenger is under GPL-3.0-or-later (see `LICENSE`). This file lists the code and data of other authors in this source
 and in the binaries built from it: what was taken, the author and version, the license, the files that hold it, and where
-the license text is. Each adapted source file also says so in its header.
+the license text is.
 
 ## Code
 
@@ -29,8 +29,9 @@ the license text is. Each adapted source file also says so in its header.
 - What: the correction history is adapted from Stockfish 19, and futility pruning, capture-history move ordering and
   pruning, and depth adjustments after late move reductions use its formulas with constants rescaled to our evaluation
   scale; the development version of 31 July 2020 guided the extensions, reductions and move ordering; the KPK bitbase of
-  Stash 37, which ours is adapted from, follows Stockfish's `bitbase.cpp`
-- Files: `search_core.c`, `tune.h`, `levels/lvl_search.c`; the KPK bitbase in `eval.c` and `levels/lvl_eval.c`
+  Stash 37, which ours is adapted from, follows Stockfish's `bitbase.cpp`;
+  the win/draw/loss model of `UCI_ShowWDL` has the form of the Stockfish 19 win rate model, with parameters fitted to Chessenger's games
+- Files: `search_core.c`, `tune.h`, `levels/lvl_search.c`; the KPK bitbase in `eval.c` and `levels/lvl_eval.c`; the win/draw/loss model in `main.c`
 
 ### SimpleChess 3.5.0
 
@@ -96,5 +97,5 @@ the license text is. Each adapted source file also says so in its header.
 
 - Author: Jamie Whiting
 - License: MIT
-- What: the network `siec_g1_w01.bin` (our own) was trained with it on Chessenger's own games; no code of bullet is in
-  this source or in the binaries
+- What: the network (our own) was trained with it on Chessenger's own games and on Leela Chess Zero training data; no
+  code of bullet is in this source or in the binaries

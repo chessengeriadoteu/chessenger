@@ -3,7 +3,7 @@
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
  * Copyright (C) 2004-2026 The Stockfish developers (Stockfish 19, see the AUTHORS file of Stockfish)
- * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and Stockfish 19. Modified by Dariusz Domagała, 2026-10-21.
+ * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and Stockfish 19. Modified by Dariusz Domagała, 2026-11-01.
  */
 static int lvl_static_exchange_evaluation(Position* pos, Move* move);
 static bool lvl_is_passed_pawn(Position* pos, int square, Color color);

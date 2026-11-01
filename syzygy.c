@@ -13,7 +13,7 @@ long long syzygy_hits = 0;
 static int limit_uci = 7;
 static int probe_depth_uci = 1;
 static bool rule50_enabled = true;
-static bool loaded = false;
+static bool tb_loaded = false;
 #if TB_EMBEDDED || TB_NEXT_TO_ENGINE
 
 static bool embedded_on = false;
@@ -21,7 +21,7 @@ static bool embedded_paused = false;
 #endif
 
 static void recompute_limit(void) {
-    int n = loaded ? (int)TB_LARGEST : 0;
+    int n = tb_loaded ? (int)TB_LARGEST : 0;
 #if TB_EMBEDDED || TB_NEXT_TO_ENGINE
     if (embedded_on && embedded_paused) n = 0;
 #endif
@@ -32,8 +32,8 @@ static void recompute_limit(void) {
 
 static void embedded_enable(void) {
     tb_from_memory = true;
-    loaded = tb_init("(embedded)");
-    embedded_on = loaded && TB_LARGEST > 0;
+    tb_loaded = tb_init("(embedded)");
+    embedded_on = tb_loaded && TB_LARGEST > 0;
     embedded_paused = false;
 }
 #elif TB_NEXT_TO_ENGINE
@@ -46,8 +46,8 @@ const char* syzygy_dir_info(void) { return beside; }
 int syzygy_dir_pieces(void) { return dir_pieces; }
 
 static void embedded_enable(void) {
-    loaded = tb_init(beside);
-    embedded_on = loaded && TB_LARGEST > 0;
+    tb_loaded = tb_init(beside);
+    embedded_on = tb_loaded && TB_LARGEST > 0;
     dir_pieces = embedded_on ? (int)TB_LARGEST : 0;
     embedded_paused = false;
 }
@@ -72,7 +72,7 @@ void syzygy_set_path(const char* tb_path) {
 #if TB_EMBEDDED
 
         embedded_enable();
-        printf("info string SyzygyPath: built-in tablebases up to %u pieces\n", loaded ? TB_LARGEST : 0);
+        printf("info string SyzygyPath: built-in tablebases up to %u pieces\n", tb_loaded ? TB_LARGEST : 0);
         fflush(stdout);
 #elif TB_NEXT_TO_ENGINE
 
@@ -83,7 +83,7 @@ void syzygy_set_path(const char* tb_path) {
             printf("info string SyzygyPath: no tablebases next to the engine (%s), tablebases off\n", beside);
         fflush(stdout);
 #else
-        loaded = false;
+        tb_loaded = false;
 #endif
     } else {
 #if TB_EMBEDDED
@@ -92,8 +92,8 @@ void syzygy_set_path(const char* tb_path) {
 #elif TB_NEXT_TO_ENGINE
         embedded_on = false;
 #endif
-        loaded = tb_init(tb_path);
-        if (!loaded) {
+        tb_loaded = tb_init(tb_path);
+        if (!tb_loaded) {
             printf("info string SyzygyPath: tb_init failed for `%s`, tablebases off\n", tb_path);
         } else if (TB_LARGEST == 0) {
             printf("info string SyzygyPath: no tablebase files found in `%s`\n", tb_path);
@@ -119,7 +119,7 @@ void syzygy_set_depth(int depth_arg) {
 
 void syzygy_set_rule50(bool enabled) { rule50_enabled = enabled; }
 
-int syzygy_largest(void) { return loaded ? (int)TB_LARGEST : 0; }
+int syzygy_largest(void) { return tb_loaded ? (int)TB_LARGEST : 0; }
 
 #define SYZ_ARGS(pos)                                                                   \
     (pos)->occupied[WHITE], (pos)->occupied[BLACK],                                     \

@@ -21,7 +21,7 @@
 #include <fcntl.h>
 #endif
 
-#define ENGINE_VERSION "3.1"
+#define ENGINE_VERSION "3.6"
 
 #define XB_START_FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 #define XB_MAX_PLIES 2048

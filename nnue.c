@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) Dariusz Domagała
- * Portions of this file are adapted from Starzix 6.0 (zzzzz, WTFPL v2, see LICENSES/STARZIX-WTFPL.txt). Modified by Dariusz Domagała, 2026-10-21.
+ * Portions of this file are adapted from Starzix 6.0 (zzzzz, WTFPL v2, see LICENSES/STARZIX-WTFPL.txt). Modified by Dariusz Domagała, 2026-11-01.
  */
 #include "nnue.h"
 
@@ -24,16 +24,16 @@
 typedef struct {
     int16_t feature_weights[2][NNUE_BUCKETS][NNUE_FEATURES][NNUE_HIDDEN];
     int16_t hidden_bias[2][NNUE_HIDDEN];
-    int16_t output_weights[2][NNUE_HIDDEN];
-    int16_t output_bias;
+    int16_t output_weights[8][2][NNUE_HIDDEN];
+    int16_t output_bias[8];
 } NnueNetwork;
 
-#define NNUE_WEIGHT_COUNT (2 * NNUE_BUCKETS * NNUE_FEATURES * NNUE_HIDDEN + 2 * NNUE_HIDDEN + 2 * NNUE_HIDDEN + 1)
+#define NNUE_WEIGHT_COUNT (2 * NNUE_BUCKETS * NNUE_FEATURES * NNUE_HIDDEN + 2 * NNUE_HIDDEN + 8 * 2 * NNUE_HIDDEN + 8)
 #define NNUE_FILE_SIZE ((long)NNUE_WEIGHT_COUNT * 2)
 
 typedef char nnue_network_size_ok[(sizeof(NnueNetwork) == (size_t)NNUE_FILE_SIZE) ? 1 : -1];
 
-static NnueNetwork net __attribute__((aligned(64)));
+static NnueNetwork nnue_net __attribute__((aligned(64)));
 static bool net_loaded = false;
 #if NNUE_LIGHT
 static unsigned net_generation = 0;
@@ -52,6 +52,8 @@ static const int nnue_queen_buckets[64] = {
     3, 3, 3, 3, 4, 4, 4, 4,
 };
 
+#define NNUE_LK(king_set, queen_set, c, mirror, bucket) nnue_mirror_bucket(king_set, queen_set, mirror, bucket)
+
 bool nnue_load(const char* net_path) {
     net_loaded = false;
 
@@ -67,12 +69,12 @@ bool nnue_load(const char* net_path) {
         return false;
     }
 
-    const size_t n_bytes_read = fread(&net, 1, (size_t)NNUE_FILE_SIZE, f);
+    const size_t n_bytes_read = fread(&nnue_net, 1, (size_t)NNUE_FILE_SIZE, f);
     const bool excess = (fgetc(f) != EOF);
     fclose(f);
     if (n_bytes_read != (size_t)NNUE_FILE_SIZE || excess) {
         fprintf(stderr, "nnue: wrong network file size (expected %ld B): %s\n", NNUE_FILE_SIZE, net_path);
-        memset(&net, 0, sizeof(net));
+        memset(&nnue_net, 0, sizeof(nnue_net));
         return false;
     }
 
@@ -86,7 +88,7 @@ bool nnue_load(const char* net_path) {
 #pragma clang diagnostic ignored "-Wc23-extensions"
 #endif
 static const unsigned char embedded_net[] = {
-#embed "siec_g1_w01.bin"
+#embed "net_t80_s936.bin"
 };
 #if defined(__clang__)
 #pragma clang diagnostic pop
@@ -100,17 +102,20 @@ bool nnue_load_embedded(void) {
         fprintf(stderr, "nnue: big-endian host, network not loaded\n");
         return false;
     }
-    memcpy(&net, embedded_net, sizeof(net));
+    memcpy(&nnue_net, embedded_net, sizeof(nnue_net));
     net_loaded = true;
     return true;
 }
 #endif
 
-#if NNUE_LIGHT
-
 long nnue_net_file_size(void) {
     return NNUE_FILE_SIZE;
 }
+int nnue_feature_count(void) {
+    return NNUE_FEATURES;
+}
+
+#if NNUE_LIGHT
 
 bool nnue_set_from_buffer(const unsigned char* data_buf, size_t n, const char** reason_msg) {
     const uint16_t endian_probe = 1;
@@ -122,7 +127,7 @@ bool nnue_set_from_buffer(const unsigned char* data_buf, size_t n, const char** 
         *reason_msg = "wrong network file size";
         return false;
     }
-    memcpy(&net, data_buf, sizeof(net));
+    memcpy(&nnue_net, data_buf, sizeof(nnue_net));
     net_loaded = true;
     net_generation++;
     *reason_msg = NULL;
@@ -133,7 +138,7 @@ static void nnue_refresh_reset(NnueThread* w) {
     for (int c = 0; c < 2; c++)
         for (int l = 0; l < 2; l++)
             for (int k = 0; k < NNUE_BUCKETS; k++) {
-                memcpy(w->refresh[c][l][k].acc, net.hidden_bias[c], sizeof(w->refresh[c][l][k].acc));
+                memcpy(w->refresh[c][l][k].acc, nnue_net.hidden_bias[c], sizeof(w->refresh[c][l][k].acc));
                 memset(w->refresh[c][l][k].bb, 0, sizeof(w->refresh[c][l][k].bb));
             }
     w->net_gen = net_generation;
@@ -172,7 +177,8 @@ static inline void acc_add2_del2(int16_t* restrict dest, const int16_t* restrict
         dest[i] = (int16_t)(src_acc[i] + add0[i] + add1[i] - del0[i] - del1[i]);
 }
 
-static inline void nnue_mirror_bucket(Bitboard king_set, Bitboard opp_queens, bool* mirror, int* bucket) {
+static inline void nnue_mirror_bucket(Bitboard king_set, Bitboard opp_queens,
+                                       bool* mirror, int* bucket) {
     const int king_sq_idx = king_set ? __builtin_ctzll(king_set) : 0;
     *mirror = (king_sq_idx & 7) >= 4;
     if (__builtin_popcountll(opp_queens) != 1) {
@@ -185,8 +191,8 @@ static inline void nnue_mirror_bucket(Bitboard king_set, Bitboard opp_queens, bo
 
 void nnue_recompute(const Position* pos, NnueAccumulators* a) {
     for (int c = 0; c < 2; c++) {
-        nnue_mirror_bucket(pos->pieces[c][KING], pos->pieces[c ^ 1][QUEEN], &a->mirror[c], &a->bucket[c]);
-        memcpy(a->acc[c], net.hidden_bias[c], sizeof(a->acc[c]));
+        NNUE_LK(pos->pieces[c][KING], pos->pieces[c ^ 1][QUEEN], c, &a->mirror[c], &a->bucket[c]);
+        memcpy(a->acc[c], nnue_net.hidden_bias[c], sizeof(a->acc[c]));
     }
 
     for (int piece_color = 0; piece_color < 2; piece_color++) {
@@ -198,19 +204,26 @@ void nnue_recompute(const Position* pos, NnueAccumulators* a) {
                 for (int c = 0; c < 2; c++) {
 
                     const int feat_idx = piece_color * 384 + nnue_net_piece_type[ptype] * 64 + (piece_sq ^ (a->mirror[c] ? 7 : 0));
-                    acc_add(a->acc[c], net.feature_weights[c][a->bucket[c]][feat_idx]);
+                    acc_add(a->acc[c], nnue_net.feature_weights[c][a->bucket[c]][feat_idx]);
                 }
             }
         }
     }
 }
 
-int nnue_eval(const NnueAccumulators* a, Color perspective) {
+static inline int nnue_kubelek_wyjscia(const Position* pos) {
+    int k = (__builtin_popcountll(pos->all_pieces) - 2) / ((32 + 8 - 1) / 8);
+    if (k < 0) k = 0;
+    if (k > 8 - 1) k = 8 - 1;
+    return k;
+}
+
+int nnue_eval(const NnueAccumulators* a, Color perspective, int bucket_idx) {
     uint32_t acc_sum = 0;
 
     for (int k = 0; k < 2; k++) {
         const int16_t* acc = a->acc[(int)perspective ^ k];
-        const int16_t* w = net.output_weights[k];
+        const int16_t* w = nnue_net.output_weights[bucket_idx][k];
         for (int i = 0; i < NNUE_HIDDEN; i++) {
             int32_t x = acc[i];
             if (x < 0) x = 0;
@@ -222,14 +235,14 @@ int nnue_eval(const NnueAccumulators* a, Color perspective) {
 
     const int32_t s = (int32_t)acc_sum;
 
-    const int32_t pre_scale = (int32_t)((uint32_t)(s / NNUE_QA + net.output_bias) * (uint32_t)NNUE_OUTPUT_SCALE);
+    const int32_t pre_scale = (int32_t)((uint32_t)(s / NNUE_QA + nnue_net.output_bias[bucket_idx]) *(uint32_t)NNUE_OUTPUT_SCALE);
     return pre_scale / (NNUE_QA * NNUE_QB);
 }
 
 int nnue_eval_full(const Position* pos) {
     NnueAccumulators a;
     nnue_recompute(pos, &a);
-    return nnue_eval(&a, pos->to_move);
+    return nnue_eval(&a, pos->to_move, nnue_kubelek_wyjscia(pos));
 }
 
 int nnue_scale_by_material(const Position* pos, int eval_value) {
@@ -244,7 +257,7 @@ int nnue_scale_by_material(const Position* pos, int eval_value) {
 
 #define NNUE_SCORE_LIMIT (SYZYGY_WIN_SCORE - 1000 - 1)
 int nnue_to_search(int scaled_eval) {
-    int v = scaled_eval * 113 / 100;
+    int v = scaled_eval * 104 / 100;
     if (v >  NNUE_SCORE_LIMIT) v =  NNUE_SCORE_LIMIT;
     if (v < -NNUE_SCORE_LIMIT) v = -NNUE_SCORE_LIMIT;
     return v;
@@ -274,7 +287,7 @@ NnueThread* nnue_thread_new(void) {
     for (int c = 0; c < 2; c++)
         for (int l = 0; l < 2; l++)
             for (int k = 0; k < NNUE_BUCKETS; k++) {
-                memcpy(w->refresh[c][l][k].acc, net.hidden_bias[c], sizeof(w->refresh[c][l][k].acc));
+                memcpy(w->refresh[c][l][k].acc, nnue_net.hidden_bias[c], sizeof(w->refresh[c][l][k].acc));
                 memset(w->refresh[c][l][k].bb, 0, sizeof(w->refresh[c][l][k].bb));
             }
     for (int j = 0; j < NNUE_STACK_SIZE; j++) w->stack[j].state = NNUE_STALE;
@@ -326,12 +339,12 @@ static void nnue_refresh(NnueThread* w, int c, NnueEntry* dest) {
             while (removed) {
                 const int piece_sq = __builtin_ctzll(removed);
                 removed &= removed - 1;
-                uw[removed_n++] = net.feature_weights[c][bucket_idx][feat_base + (piece_sq ^ m)];
+                uw[removed_n++] = nnue_net.feature_weights[c][bucket_idx][feat_base + (piece_sq ^ m)];
             }
             while (added) {
                 const int piece_sq = __builtin_ctzll(added);
                 added &= added - 1;
-                dw[added_n++] = net.feature_weights[c][bucket_idx][feat_base + (piece_sq ^ m)];
+                dw[added_n++] = nnue_net.feature_weights[c][bucket_idx][feat_base + (piece_sq ^ m)];
             }
             o->bb[piece_color][ptype] = new_bb;
         }
@@ -368,12 +381,12 @@ static void nnue_refresh(NnueThread* w, int c, NnueEntry* dest) {
             while (removed) {
                 const int piece_sq = __builtin_ctzll(removed);
                 removed &= removed - 1;
-                acc_sub(o->acc, net.feature_weights[c][bucket_idx][feat_base + (piece_sq ^ m)]);
+                acc_sub(o->acc, nnue_net.feature_weights[c][bucket_idx][feat_base + (piece_sq ^ m)]);
             }
             while (added) {
                 const int piece_sq = __builtin_ctzll(added);
                 added &= added - 1;
-                acc_add(o->acc, net.feature_weights[c][bucket_idx][feat_base + (piece_sq ^ m)]);
+                acc_add(o->acc, nnue_net.feature_weights[c][bucket_idx][feat_base + (piece_sq ^ m)]);
             }
             o->bb[piece_color][ptype] = new_bb;
         }
@@ -397,7 +410,7 @@ static void nnue_step(NnueThread* w, const NnueEntry* src_acc, NnueEntry* dest) 
     }
 
     for (int c = 0; c < 2; c++) {
-        nnue_mirror_bucket(dest->bb[c][KING], dest->bb[c ^ 1][QUEEN], &dest->a.mirror[c], &dest->a.bucket[c]);
+        NNUE_LK(dest->bb[c][KING], dest->bb[c ^ 1][QUEEN], c, &dest->a.mirror[c], &dest->a.bucket[c]);
         if (dest->a.mirror[c] != src_acc->a.mirror[c] || dest->a.bucket[c] != src_acc->a.bucket[c] || removed_n > 2 || added_n > 2) {
             nnue_refresh(w, c, dest);
             continue;
@@ -405,7 +418,7 @@ static void nnue_step(NnueThread* w, const NnueEntry* src_acc, NnueEntry* dest) 
         const int m = dest->a.mirror[c] ? 7 : 0, bucket_idx = dest->a.bucket[c];
         int16_t* a = dest->a.acc[c];
         const int16_t* p = src_acc->a.acc[c];
-#define NNUE_WEIGHTS_AT(f) (net.feature_weights[c][bucket_idx][(f) ^ m])
+#define NNUE_WEIGHTS_AT(f) (nnue_net.feature_weights[c][bucket_idx][(f) ^ m])
         if (added_n == 1 && removed_n == 1)      acc_add1_del1(a, p, NNUE_WEIGHTS_AT(added[0]), NNUE_WEIGHTS_AT(removed[0]));
         else if (added_n == 1 && removed_n == 2) acc_add1_del2(a, p, NNUE_WEIGHTS_AT(added[0]), NNUE_WEIGHTS_AT(removed[0]), NNUE_WEIGHTS_AT(removed[1]));
         else if (added_n == 2 && removed_n == 2) acc_add2_del2(a, p, NNUE_WEIGHTS_AT(added[0]), NNUE_WEIGHTS_AT(added[1]), NNUE_WEIGHTS_AT(removed[0]), NNUE_WEIGHTS_AT(removed[1]));
@@ -432,5 +445,5 @@ int nnue_eval_node(NnueThread* w, int ply, const Position* pos) {
         e->state = NNUE_CURRENT;
         src_acc = e;
     }
-    return nnue_to_search(nnue_scale_by_material(pos, nnue_eval(&src_acc->a, pos->to_move)));
+    return nnue_to_search(nnue_scale_by_material(pos, nnue_eval(&src_acc->a, pos->to_move, nnue_kubelek_wyjscia(pos))));
 }

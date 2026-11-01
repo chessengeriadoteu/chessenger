@@ -2,7 +2,7 @@
  * Copyright (C) Dariusz Domagała
  * Copyright (C) 2021 kz04px (4ku 5.1, MIT, see LICENSES/4KU-MIT.txt)
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
- * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-10-21.
+ * Portions of this file are adapted from Stash 37. Modified by Dariusz Domagała, 2026-11-01.
  * KPK bitbase adapted from Stash 37, whose KPK bitbase follows Stockfish's bitbase.cpp.
  */
 #include "eval.h"

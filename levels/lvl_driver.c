@@ -3,7 +3,7 @@
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
  * Copyright (C) Sam Moore (SimpleChess 3.5.0)
- * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and SimpleChess 3.5.0. Modified by Dariusz Domagała, 2026-10-21.
+ * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and SimpleChess 3.5.0. Modified by Dariusz Domagała, 2026-11-01.
  */
 void print_uci_info(int depth, int seldepth, int score, long long time_ms, long long nodes, const char* pv);
 void print_uci_info_multipv(int multipv_idx, int depth, int seldepth, int score,

@@ -54,9 +54,15 @@ bool console_strength_value(const char* name, char* value, size_t n);
 const LevelStrength* console_strength_go(bool bench);
 const LevelStrength* console_strength_game(void);
 
+bool console_hint_go(void);
+
 void console_uci_help(void);
 
 void console_banner_hint(void);
+
+void console_uci_unknown(const char* line);
+
+void console_logo(void);
 
 int console_command_line(int argc, char** argv, Position* pos);
 
@@ -69,5 +75,18 @@ bool console_queued_line(char* out, size_t n);
 bool console_option_at(int i, const char** name, char* value, size_t n, bool* known);
 
 int console_static_eval(Position* p, bool* network);
+
+typedef struct {
+    bool built;
+    bool loaded;
+    bool embedded;
+    bool plays;
+    const char* file;
+    const char* md5;
+    long bytes;
+    int inputs, hidden, king_buckets, queen_buckets, outputs;
+    int scale_num, scale_den;
+} ConsoleNetwork;
+void console_network(ConsoleNetwork* n);
 
 #endif
