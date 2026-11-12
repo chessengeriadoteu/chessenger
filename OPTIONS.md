@@ -1,6 +1,6 @@
-# Chessenger 3.6: UCI options and built-in tablebases
+# Chessenger 4.2: UCI options and built-in tablebases
 
-This page belongs to the [README](README.md) of Chessenger 3.6.
+This page belongs to the [README](README.md) of Chessenger 4.2.
 
 ## Options
 

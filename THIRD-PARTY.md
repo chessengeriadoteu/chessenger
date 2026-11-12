@@ -1,4 +1,4 @@
-# Third-party code and data in Chessenger 3.6
+# Third-party code and data in Chessenger 4.2
 
 Chessenger is under GPL-3.0-or-later (see `LICENSE`). This file lists the code and data of other authors in this source
 and in the binaries built from it: what was taken, the author and version, the license, the files that hold it, and where
@@ -28,7 +28,7 @@ the license text is.
 - License: GPL-3.0-or-later, text in `LICENSE`
 - What: the correction history is adapted from Stockfish 19, and futility pruning, capture-history move ordering and
   pruning, and depth adjustments after late move reductions use its formulas with constants rescaled to our evaluation
-  scale; the development version of 31 July 2020 guided the extensions, reductions and move ordering; the KPK bitbase of
+  scale; the repetition rule relative to the root, the move-count pruning in quiescence search, multi-cut returning the search value and the transposition table cutoff rules (non-PV nodes, 50-move counter below 96) follow Stockfish 19; the development version of 31 July 2020 guided the extensions, reductions, move ordering and the checks and recaptures in quiescence search; the KPK bitbase of
   Stash 37, which ours is adapted from, follows Stockfish's `bitbase.cpp`;
   the win/draw/loss model of `UCI_ShowWDL` has the form of the Stockfish 19 win rate model, with parameters fitted to Chessenger's games
 - Files: `search_core.c`, `tune.h`, `levels/lvl_search.c`; the KPK bitbase in `eval.c` and `levels/lvl_eval.c`; the win/draw/loss model in `main.c`
@@ -97,5 +97,5 @@ the license text is.
 
 - Author: Jamie Whiting
 - License: MIT
-- What: the network (our own) was trained with it on Chessenger's own games and on Leela Chess Zero training data; no
+- What: the network (our own) was trained with it on Chessenger's own games, on Leela Chess Zero training data and on Stockfish training data rescored by a Leela Chess Zero network, which are made available under the Open Database License (ODbL); no
   code of bullet is in this source or in the binaries

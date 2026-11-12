@@ -4,7 +4,7 @@
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
  * Copyright (C) 2004-2026 The Stockfish developers (Stockfish 19, see the AUTHORS file of Stockfish)
  * Copyright (C) Sam Moore (SimpleChess 3.5.0)
- * Portions of this file are adapted from OliThink 5.10.5, Stash 37, Stockfish 19 and SimpleChess 3.5.0. Modified by Dariusz Domagała, 2026-11-01.
+ * Portions of this file are adapted from OliThink 5.10.5, Stash 37, Stockfish 19 and SimpleChess 3.5.0. Modified by Dariusz Domagała, 2026-11-12.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,7 +35,7 @@
 #define NULL_DEVICE "/dev/null"
 #endif
 
-#define ENGINE_VERSION "3.6"
+#define ENGINE_VERSION "4.2"
 
 bool position_changed = false;
 bool stop_requested = false;
@@ -563,6 +563,20 @@ static void wdl_field(char* out, size_t n, int score, bool mat) {
     const int w = wdl_wygrana(v, a, b);
     const int l = wdl_wygrana(-v, a, b);
     snprintf(out, n, " wdl %d %d %d", w, 1000 - w - l, l);
+}
+
+double console_wdl_chance(int score, const Position* p) {
+    const bool show = uci_show_wdl;
+    const int material = wdl_material;
+    char at_sq[48];
+    uci_show_wdl = true;
+    wdl_material = wdl_material_policz(p);
+    wdl_field(at_sq, sizeof(at_sq), score, false);
+    uci_show_wdl = show;
+    wdl_material = material;
+    int w = 0, d = 0, l = 0;
+    if (sscanf(at_sq, " wdl %d %d %d", &w, &d, &l) != 3) return 0.0;
+    return (double)(w - l) / 1000.0;
 }
 
 void print_uci_info_multipv(int multipv_idx, int depth, int seldepth, int score,
@@ -1687,7 +1701,7 @@ void console_network(ConsoleNetwork* n) {
     n->plays = n->loaded && !lvl_active(console_strength_game(), USE_NNUE_NOW);
 #if !NNUE_LIGHT
     n->embedded = true;
-    n->md5 = "47bf96d30f431242b514be9e76593d10";
+    n->md5 = "29d37c3d3fb9a4d686b239dc88ebe6ed";
 #else
     n->file = light_net_source;
 #endif
@@ -1697,7 +1711,7 @@ void console_network(ConsoleNetwork* n) {
     n->king_buckets = 1;
     n->queen_buckets = 5;
     n->outputs = 8;
-    n->scale_num = 104;
+    n->scale_num = 103;
     n->scale_den = 100;
 }
 
@@ -1969,8 +1983,9 @@ int main(int argc, char** argv) {
 
         } else if (xboard_active()) {
 
-            if (xboard_handle_line(&pos, input, sizeof(input)) == XBOARD_QUIT) break;
-            continue;
+            const XboardAction xa = xboard_handle_line(&pos, input, sizeof(input));
+            if (xa == XBOARD_QUIT) break;
+            if (xa != XBOARD_PASS) continue;
         } else if (console_active()) {
             ConsoleAction ca = console_handle_line(&pos, input, sizeof(input));
             if (ca == CONSOLE_DONE) continue;

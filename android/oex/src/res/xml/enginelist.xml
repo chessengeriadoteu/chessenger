@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<enginelist>
+    <engine name="Chessenger 4.2" filename="libchessenger.so" target="arm64-v8a" />
+</enginelist>

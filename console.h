@@ -76,6 +76,8 @@ bool console_option_at(int i, const char** name, char* value, size_t n, bool* kn
 
 int console_static_eval(Position* p, bool* network);
 
+double console_wdl_chance(int score, const Position* p);
+
 typedef struct {
     bool built;
     bool loaded;

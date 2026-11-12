@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Chessenger OEX engine package. GPL-3.0-or-later. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="eu.chessengeria.chessenger"
+    android:versionCode="42"
+    android:versionName="4.2">
+
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="36" />
+
+    <application
+        android:label="Chessenger"
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:hasCode="true">
+
+        <activity
+            android:name=".InfoActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="intent.chess.provider.ENGINE" />
+            </intent-filter>
+            <meta-data
+                android:name="chess.provider.engine.authority"
+                android:value="eu.chessengeria.chessenger.engine" />
+        </activity>
+
+        <provider
+            android:name=".EngineProvider"
+            android:authorities="eu.chessengeria.chessenger.engine"
+            android:exported="true" />
+    </application>
+</manifest>

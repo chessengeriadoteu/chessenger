@@ -1,6 +1,6 @@
-# Build Chessenger 3.6 from source
+# Build Chessenger 4.2 from source
 
-This page belongs to the [README](README.md) of Chessenger 3.6.
+This page belongs to the [README](README.md) of Chessenger 4.2.
 
 Chessenger has been adapted to be built and used on the systems below; each link leads to its build steps.
 
@@ -12,18 +12,20 @@ Chessenger has been adapted to be built and used on the systems below; each link
 - [FreeBSD](#freebsd): ARM64
 - [OpenBSD](#openbsd): ARM64
 - [Linux on RISC-V](#linux-on-risc-v): cross-compiled with zig, tested under QEMU (user mode)
+- [Android](#android): ARM64, cross-compiled with the Android NDK
+- [iPhone and iPad (WebAssembly)](#iphone-and-ipad-webassembly): cross-compiled with zig
 - [All release binaries at once](#all-release-binaries-at-once)
 - [Light binary, build without tablebases and neural network (NNUE)](#light-binary-build-without-tablebases-and-neural-network-nnue)
 
 ## Before you build
 
-- Every standard build (not the light builds) puts the network file `net_t80_s936.bin` (next to `nnue.c`) and the 70 tablebase files in `tablebases/` into the binary with the C23 `#embed` directive.
+- Every standard build (not the light builds) puts the network file `net_g5_s1086.bin` (next to `nnue.c`) and the 70 tablebase files in `tablebases/` into the binary with the C23 `#embed` directive.
 - So the compiler must know `#embed`: gcc 15 or newer, or a recent clang.
 - A missing file or a network with a different md5 stops a `make` build.
 
 ## Check your build
 
-Run `bench`. The last lines must show `Nodes searched  : 3163361`, the same nodes as every release binary.
+Run `bench`. The last lines must show `Nodes searched  : 2976315`, the same nodes as every release binary.
 
 ```
 ./chessenger bench
@@ -205,7 +207,7 @@ Cross-compiled with zig, tested under QEMU (user mode).
 **Step 1:** build on a Mac with zig 0.17:
 
 ```
-make CC="zig cc -target riscv64-linux-musl -D_POSIX_C_SOURCE=200809L -static" ARCH=""
+make CC="zig cc -target riscv64-linux-musl -D_XOPEN_SOURCE=700 -static" ARCH=""
 ```
 
 **Step 2:** run on Linux with QEMU (package `qemu-user` on Ubuntu):
@@ -213,6 +215,32 @@ make CC="zig cc -target riscv64-linux-musl -D_POSIX_C_SOURCE=200809L -static" AR
 ```
 qemu-riscv64 ./chessenger bench
 ```
+
+## Android
+
+Cross-compiled on a Mac with the Android NDK r30, for Android 5.0 (API level 21) and newer, as a static binary.
+
+**Build** in the source folder, with `NDK` set to the folder of the unpacked NDK:
+
+```
+$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang --target=aarch64-linux-android21 -mcpu=generic -std=c99 -O3 -flto -DNDEBUG -DSMP=1 -pthread -DTB_EMBEDDED=1 --embed-dir=tablebases -D_XOPEN_SOURCE=700 -static -s -o chessenger-4.2-android-arm64 search.c board.c console.c eval.c king_safety.c magic.c main.c movegen.c nnue.c pawn_structure.c san.c search_core.c smp.c syzygy.c syzygy_embedded.c tt.c utils.c xboard.c fathom/tbprobe.c levels/levels.c -lm
+```
+
+**Check** on the phone in Termux (`ANDROID.md`): `bench` must show 2976315 nodes. `android/oex/buduj_apk.zsh` packs this binary into the APK (usage in its first lines).
+
+## iPhone and iPad (WebAssembly)
+
+Cross-compiled with zig 0.17 for WASI (`wasm32-wasi`), one thread. The files in `wasm/` supply what WASI lacks: functions for signals and the terminal, and reading the keyboard during a search in a-Shell.
+
+**Build** in the source folder. These lines build `chessenger-4.2-ios.wasm`; without `-msimd128` in the first line and with `-o chessenger-4.2-ios-nosimd.wasm` in the last line they build `chessenger-4.2-ios-nosimd.wasm`:
+
+```
+F=(-target wasm32-wasi -O3 -msimd128 -std=c99 -DNDEBUG -DSMP=1 -DTB_EMBEDDED=1 --embed-dir=tablebases -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_PROCESS_CLOCKS -include wasm/wasi_shim.h)
+zig cc "${F[@]}" -include wasm/wasi_search.h -c search.c -o search.o
+zig cc "${F[@]}" -s -Wl,-z,stack-size=8388608 -Wl,--max-memory=1073741824 -o chessenger-4.2-ios.wasm search.o board.c console.c eval.c king_safety.c magic.c main.c movegen.c nnue.c pawn_structure.c san.c search_core.c smp.c syzygy.c syzygy_embedded.c tt.c utils.c xboard.c fathom/tbprobe.c levels/levels.c wasm/wasi_stub.c -lm -lwasi-emulated-signal -lwasi-emulated-mman -lwasi-emulated-process-clocks
+```
+
+**Check** in a-Shell (`IOS.md`): `bench` inside the console must show 2976315 nodes.
 
 ## All release binaries at once
 
@@ -226,7 +254,7 @@ brew install zig llvm@22
 
 **Build**
 
-macOS, Linux and Windows binaries into `dist/` (the macOS and Linux ones with PGO, except `macos-x64-avx2`; the Windows ones without). The released `windows-arm64-pgo` is built outside make, with llvm-mingw and PGO, so `make release` gives `windows-arm64` without PGO instead:
+macOS, Linux and Windows binaries into `dist/` (the macOS and Linux ones with PGO, except `macos-x64-avx2`; the Windows one without). The released `windows-x64-avx2` and `windows-arm64-pgo` are built outside make, with llvm-mingw, so `make release` gives only `windows-arm64`, without PGO, as a Windows file:
 
 ```
 make release
@@ -262,7 +290,7 @@ make release LIGHT=1
 
 **How the light binary finds its files**
 
-- The network `net_t80_s936.bin`: from the UCI option EvalFile, from its own folder or from the current folder.
+- The network `net_g5_s1086.bin`: from the UCI option EvalFile, from its own folder or from the current folder.
 - The Syzygy tablebases: from the folder `tablebases/` next to it or from SyzygyPath.
 - Without a network it plays on the classic evaluation and says so (`bench` then gives 4554810 nodes).
 - If the path of the binary's folder contains the path list separator (`:` on macOS and Linux, `;` on Windows), the light binary does not find `tablebases/` next to it, so keep it in a folder without that character.

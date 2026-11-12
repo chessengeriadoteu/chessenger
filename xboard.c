@@ -21,7 +21,7 @@
 #include <fcntl.h>
 #endif
 
-#define ENGINE_VERSION "3.6"
+#define ENGINE_VERSION "4.2"
 
 #define XB_START_FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 #define XB_MAX_PLIES 2048
@@ -59,6 +59,7 @@ static char xb_edit_board[64];
 typedef enum { XS_NONE, XS_MOVE, XS_ANALYZE } XbSearch;
 static XbSearch xb_search = XS_NONE;
 static bool xb_discard = false;
+static bool xb_leaving = false;
 static bool xb_have_best = false;
 static Move xb_best;
 static char xb_last_pv[1024] = "";
@@ -83,6 +84,11 @@ static int xb_nopts = 0;
 static int xb_cap_saved = -1;
 static int xb_cap_read = -1;
 static char xb_cap_text[16384];
+
+static bool xb_960_before = false;
+#ifndef _WIN32
+static void (*xb_int_before)(int) = SIG_DFL;
+#endif
 
 bool xboard_active(void) { return xb_on; }
 
@@ -369,12 +375,30 @@ static void xb_new_game_state(void) {
 
 void xboard_enter(void) {
     xb_on = true;
+    xb_960_before = uci_chess960;
 #ifndef _WIN32
 
-    signal(SIGINT, SIG_IGN);
+    xb_int_before = signal(SIGINT, SIG_IGN);
 #endif
     xb_new_game_state();
     xb_analyze_dirty = false;
+}
+
+static void xb_leave(void) {
+    if (xb_cap_saved >= 0) xb_capture_end();
+    xb_on = false;
+#ifndef _WIN32
+    if (xb_int_before != SIG_ERR) signal(SIGINT, xb_int_before);
+#endif
+    uci_chess960 = xb_960_before;
+    xb_v2 = xb_analyze = xb_analyze_dirty = xb_post = xb_hard = xb_discard = xb_have_best = false;
+    xb_search = XS_NONE;
+    xb_qn = xb_nopts = 0;
+    xb_tc = XTC_NONE;
+    xb_mps = 0;
+    xb_base_ms = 300000;
+    xb_inc_ms = xb_st_ms = 0;
+    xb_last_pv[0] = xb_hint[0] = '\0';
 }
 
 static void xb_play_best(void) {
@@ -417,7 +441,7 @@ bool xboard_before_read(Position* pos, char* line, size_t size) {
         const XbSearch kind = xb_search;
         xb_search = XS_NONE;
         if (kind == XS_MOVE && !xb_discard) xb_play_best();
-        xb_discard = false;
+        xb_discard = xb_leaving = false;
         xb_have_best = false;
     }
     if (xb_qn == 0 && xb_analyze && xb_analyze_dirty) {
@@ -480,7 +504,7 @@ void xboard_search_info(int multipv, int depth, int seldepth, int score, bool ma
                         long long time_ms, long long nodes, const char* pv) {
     (void)seldepth;
     if (multipv <= 1) snprintf(xb_last_pv, sizeof(xb_last_pv), "%s", pv ? pv : "");
-    if (!xb_post && xb_search != XS_ANALYZE) return;
+    if (xb_leaving || (!xb_post && xb_search != XS_ANALYZE)) return;
     int s = score;
     if (mate) s = mate_moves > 0 ? 100000 + mate_moves : -100000 + mate_moves;
     char txt[1024];
@@ -510,6 +534,10 @@ int xboard_line_in_search(const char* typed) {
     if (strcmp(w, "hard") == 0)   { xb_hard = true;  return 2; }
     if (strcmp(w, "easy") == 0)   { xb_hard = false; return 2; }
     if (strcmp(w, ".") == 0) return 2;
+    if (!rest[0] && (strcmp(w, "uci") == 0 || strcmp(w, "console") == 0)) {
+        xb_discard = xb_leaving = true;
+        return 1;
+    }
     if (xb_search == XS_MOVE) {
         if (strcmp(w, "?") == 0) return 3;
         if (strcmp(w, "force") == 0 || strcmp(w, "new") == 0 || strcmp(w, "result") == 0 ||
@@ -718,11 +746,16 @@ static void xb_user_move(const char* text, bool must_be_move, const char* whole)
 static bool xb_is(const char* w, const char* name) { return strcmp(w, name) == 0; }
 
 XboardAction xboard_handle_line(Position* pos, char* line, size_t size) {
-    (void)pos;
     (void)size;
-    if (xb_edit) { xb_edit_line(line); return XBOARD_DONE; }
     char w[64];
     const char* args = xb_word(line, w, sizeof(w));
+    if (!args[0] && (xb_is(w, "uci") || xb_is(w, "console"))) {
+        xb_leave();
+        if (xb_is(w, "uci")) return XBOARD_PASS;
+        console_enter(pos);
+        return XBOARD_DONE;
+    }
+    if (xb_edit) { xb_edit_line(line); return XBOARD_DONE; }
     if (!w[0]) return XBOARD_DONE;
 
     if (xb_is(w, "quit")) return XBOARD_QUIT;

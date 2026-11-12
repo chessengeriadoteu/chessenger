@@ -2,7 +2,7 @@
 # Copyright (C) Dariusz Domagała
 #
 # make              build for this machine with portable flags (macOS, Linux, Windows MSYS2/MinGW)
-# make release      all published binaries except 32-bit Windows and windows-arm64-pgo (built outside make, see below) into dist/ (needs zig for Linux and Windows, tested with 0.17)
+# make release      all published binaries except 32-bit Windows, windows-x64-avx2 and windows-arm64-pgo (built outside make, see below) into dist/ (needs zig for Linux and Windows, tested with 0.17)
 # make release-x32  32-bit Windows binary into dist/ (needs zig, tested with 0.17)
 # make release also needs Homebrew LLVM (LLVM_BIN, the LLVM version of zig's clang) for the Linux binaries with PGO
 
@@ -14,9 +14,9 @@ ENGINE  := $(strip $(filter-out win_stdin.c,$(sort $(wildcard *.c))) $(wildcard 
 # Playing levels (version 3.1 and later): levels/levels.c is the only unit of the folder levels/ (it includes the
 # other files there itself), so it is listed by name, not by levels/*.c.
 ENGINE  += levels/levels.c
-VERSION := 3.6
+VERSION := 4.2
 # release date in the build banner (`main.c`, BUILD_DATE); only a string, search and evaluation do not read it
-BUILD_DATE := 2026-11-01
+BUILD_DATE := 2026-11-12
 CFLAGS  += '-DBUILD_DATE="$(BUILD_DATE)"'
 
 # Syzygy (version 2.0 and later): fathom/tbprobe.c is the only Fathom unit (it includes tbchess.c itself), so it is
@@ -30,9 +30,9 @@ ifneq ($(wildcard smp.c),)
 endif
 
 # Light binary (version 3.1 and later): `make LIGHT=1` builds without the network and without the tablebases inside.
-# The engine reads the network file net_t80_s936.bin from the UCI option EvalFile, from its own folder or from the current
+# The engine reads the network file net_g5_s1086.bin from the UCI option EvalFile, from its own folder or from the current
 # folder, and the Syzygy tablebases from the folder tablebases/ next to it (or from SyzygyPath). Without a network it plays
-# on the classic evaluation (one thread) and says so. Neither net_t80_s936.bin nor tablebases/ is needed to build it; the
+# on the classic evaluation (one thread) and says so. Neither net_g5_s1086.bin nor tablebases/ is needed to build it; the
 # binaries get the suffix -light. When switching LIGHT run `make clean` first: make does not track CFLAGS.
 LIGHT ?= 0
 ifeq ($(LIGHT),1)
@@ -44,8 +44,8 @@ ifeq ($(LIGHT),1)
 endif
 # NNUE network (version 3.0 and later): nnue.c embeds the network file with the C23 embed directive (clang 19+, gcc 15+).
 # The file must lie next to nnue.c; a missing file or a different md5 stops the build, so no binary is built without its network.
-NNUE_FILE := net_t80_s936.bin
-NNUE_MD5  := 47bf96d30f431242b514be9e76593d10
+NNUE_FILE := net_g5_s1086.bin
+NNUE_MD5  := 29d37c3d3fb9a4d686b239dc88ebe6ed
 ifneq ($(LIGHT),1)
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
     ifeq ($(wildcard $(NNUE_FILE)),)
@@ -95,7 +95,7 @@ else
             ARCH ?= -march=x86-64-v2
         endif
     else
-        CFLAGS += -D_POSIX_C_SOURCE=200809L
+        CFLAGS += -D_XOPEN_SOURCE=700
         ifeq ($(UNAME_M),x86_64)
             ARCH ?= -march=x86-64-v2
         else
@@ -116,27 +116,29 @@ D := dist/chessenger-$(VERSION)
 ifeq ($(LIGHT),1)
     D := $(D)-light
 endif
-LINUX := -D_POSIX_C_SOURCE=200809L -static -s
+LINUX := -D_XOPEN_SOURCE=700 -static -s
 WIN   := win_stdin.c -s
 # zig 0.17 + mingw: -flto does not link (undefined nanl in zigc), so Windows builds go without LTO
 WCFLAGS := $(filter-out -flto,$(CFLAGS))
-# Eight release binaries. `-pgo` in the file name = built with profile-guided optimisation: instrumented binary, training
+# Release binaries. `-pgo` in the file name = built with profile-guided optimisation: instrumented binary, training
 # run on `bench`, final binary with the profile. Search output (nodes) is identical to the build without PGO; only speed changes.
 # macos-arm64: Apple clang. linux-arm64, linux-x64-avx2: zig cannot write a profile, so the same source is built for macOS on the
 # same CPU architecture with Homebrew clang (LLVM_BIN, the LLVM version of zig's clang: 22 for zig 0.17) and trained there, the x86-64
-# one under Rosetta 2 (training binaries are not released; the x86-64 one targets macOS 10.13, the minimum of the Homebrew
-# profile runtime, with 16 KB segment alignment, the alignment of its profile sections); zig then uses that profile.
+# one under Rosetta 2 with -march=x86-64-v3, so the profile covers the AVX2 code path of nnue.c (training binaries are not released;
+# the x86-64 one targets macOS 10.13, the minimum of the Homebrew profile runtime, with 16 KB segment alignment, the alignment of its
+# profile sections); zig then uses that profile. linux-x64-avx2 is built for x86_64_v3 (AVX2, BMI2, FMA), with LTO.
 # Functions whose code differs between the macOS and the musl C library headers (character class macros) get no profile,
 # which is what -Wno-profile-instr-out-of-date silences.
-# windows-arm64 with PGO is built outside make (clang from llvm-mingw, trained on Windows on ARM); here `make release` builds
-# windows-arm64 with zig, without PGO and with the same nodes. windows-x32 (`make release-x32`) is released as built here, without PGO.
+# windows-x64-avx2 (clang from llvm-mingw, -march=x86-64-v3, LTO, no PGO) and windows-arm64-pgo (the same clang, trained on Windows on ARM)
+# are built outside make; here `make release` builds windows-arm64 with zig, without PGO and with the same nodes, and no
+# windows-x64 at all. windows-x32 (`make release-x32`) is released as built here, without PGO.
 PROFDATA ?= xcrun llvm-profdata
 PGO      := pgo_training
 MACARM   := -arch arm64 $(CFLAGS) -mcpu=apple-m1 -mmacosx-version-min=11.0
 LLVM_BIN ?= /opt/homebrew/opt/llvm@22/bin
 SDK       = $(shell xcrun --show-sdk-path 2>/dev/null)
 TRAIN_A   = -arch arm64 -isysroot $(SDK) $(CFLAGS) -mcpu=apple-m1 -mmacosx-version-min=11.0
-TRAIN_X   = -arch x86_64 -isysroot $(SDK) $(CFLAGS) -march=x86-64 -mmacosx-version-min=10.13 -Wl,-segalign,0x4000
+TRAIN_X   = -arch x86_64 -isysroot $(SDK) $(CFLAGS) -march=x86-64-v3 -mmacosx-version-min=10.13 -Wl,-segalign,0x4000
 ZPGO     := -DBUILD_PGO=1 -Wno-profile-instr-out-of-date
 # File variant in the build banner (`main.c`, BUILD_FLAGS), e.g. macos-arm64-pgo; only a string, search and evaluation do not read it
 VARIANT   = '-DBUILD_FLAGS="$(1)$(if $(filter 1,$(LIGHT)), light)"'
@@ -155,9 +157,7 @@ release:
 	$(CC) $(MACARM) -fprofile-instr-use=$(PGO)/mac.profdata -DBUILD_PGO=1 $(call VARIANT,macos-arm64-pgo) -o $(D)-macos-arm64-pgo $(ENGINE) $(LDLIBS)
 	$(CC) -arch x86_64 $(CFLAGS) -march=x86-64-v2 -mavx2 -mmacosx-version-min=10.9 $(call VARIANT,macos-x64-avx2) -o $(D)-macos-x64-avx2 $(ENGINE) $(LDLIBS)
 	$(ZIG) cc -target aarch64-linux-musl  -mcpu=generic        $(CFLAGS) $(LINUX) -fprofile-instr-use=$(PGO)/arm64.profdata $(ZPGO) $(call VARIANT,linux-arm64-pgo) -o $(D)-linux-arm64-pgo    $(ENGINE) $(LDLIBS)
-	$(ZIG) cc -target x86_64-linux-musl   -mcpu=x86_64_v2+avx2 $(CFLAGS) $(LINUX) -fprofile-instr-use=$(PGO)/x64.profdata   $(ZPGO) $(call VARIANT,linux-x64-avx2-pgo) -o $(D)-linux-x64-avx2-pgo $(ENGINE) $(LDLIBS)
-	$(ZIG) cc -target x86_64-windows-gnu  -mcpu=x86_64_v2+avx2 $(WCFLAGS) $(call VARIANT,windows-x64-avx2) -o $(D)-windows-x64-avx2.exe $(ENGINE) $(WIN) $(LDLIBS)
-	$(ZIG) cc -target x86_64-windows-gnu  -mcpu=x86_64_v3      $(WCFLAGS) $(call VARIANT,windows-x64-bmi2) -o $(D)-windows-x64-bmi2.exe $(ENGINE) $(WIN) $(LDLIBS)
+	$(ZIG) cc -target x86_64-linux-musl   -mcpu=x86_64_v3      $(CFLAGS) $(LINUX) -fprofile-instr-use=$(PGO)/x64.profdata   $(ZPGO) $(call VARIANT,linux-x64-avx2-pgo) -o $(D)-linux-x64-avx2-pgo $(ENGINE) $(LDLIBS)
 	$(ZIG) cc -target aarch64-windows-gnu -mcpu=generic        $(WCFLAGS) $(call VARIANT,windows-arm64) -o $(D)-windows-arm64.exe     $(ENGINE) $(WIN) $(LDLIBS)
 	rm -rf $(PGO)
 

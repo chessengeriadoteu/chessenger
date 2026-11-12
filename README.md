@@ -1,10 +1,10 @@
-# Chessenger 3.6
+# Chessenger 4.2
 
 Chessenger is a chess engine created from scratch as part of Chessengeria (https://www.chessengeria.eu), following the ideas and chess knowledge
 of Dariusz Domagała, in cooperation with Claude Code. It is written in C. Code and data adapted from other projects are named near the end of this file and in `THIRD-PARTY.md`.
 
 Chessenger is a sophisticated, modern and strong chess engine. It runs on many systems and devices, from the newest computers to old ones:
-binaries for macOS, Linux and Windows (down to 32-bit Windows PCs with SSE2), and build steps for FreeBSD, OpenBSD and Linux
+binaries for macOS, Linux and Windows (down to 32-bit Windows PCs with SSE2), files for Android and iPhone/iPad, and build steps for FreeBSD, OpenBSD and Linux
 on RISC-V. It speaks UCI, the older [WinBoard/XBoard](#winboardxboard) protocol, and has a [console mode](#console) for people.
 
 It is a sparring partner for players from beginner to grandmaster: `skill 1` to `skill 9` play at about 1200 to 2800 Elo
@@ -12,15 +12,15 @@ It is a sparring partner for players from beginner to grandmaster: `skill 1` to 
 
 ![Chessenger console: a game against Chessenger, mate after a hint](images/console-mate.png)
 
-- **Version:** 3.6 (code date 2026-11-01)
-- **Strength:** 3660 CElo, on the scale of the Mac Chess Engines Rating List (MCERL, https://www.chessengeria.eu/mcerl)
+- **Version:** 4.2 (code date 2026-11-12)
+- **Strength:** 3715 CElo, on the scale of the Mac Chess Engines Rating List (MCERL, https://www.chessengeria.eu/mcerl)
 - **Network:** our own, built into the binary (see [Neural network](#neural-network))
-- **Download:** eight binaries for macOS, Linux and Windows (see [Download and run](#download-and-run))
+- **Download:** binaries for macOS, Linux, Windows, Android and iPhone/iPad (see [Download and run](#download-and-run))
 - **Build:** macOS, Linux, Windows, FreeBSD, OpenBSD and Linux on RISC-V (see [BUILD.md](BUILD.md))
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/strength-dark.svg">
-  <img alt="Chessenger playing strength by version, 0.5 to 3.6" src="images/strength-light.svg">
+  <img alt="Chessenger playing strength by version, 0.5 to 4.2" src="images/strength-light.svg">
 </picture>
 
 ## Part of Chessengeria
@@ -29,32 +29,23 @@ Dariusz Domagała founded and runs Chessengeria (https://www.chessengeria.eu). C
 Chessengeria runs the Mac Chess Engines Rating List (MCERL), where chess engines play hundreds of thousands of games, and that work gave
 Chessenger its yardstick and its reason to be built.
 
-## Contents
-
-- [Download and run](#download-and-run)
-- [Using Chessenger in a chess GUI (UCI)](#using-chessenger-in-a-chess-gui-uci)
-  - [Options and built-in tablebases](OPTIONS.md)
-- [WinBoard/XBoard](#winboardxboard)
-- [Console](#console)
-- [Build from source](#build-from-source)
-- [Neural network](#neural-network)
-- [How Chessenger is made](#how-chessenger-is-made)
-- [License](#license)
-
 ## Download and run
 
-This version's GitHub Release carries eight archives; each holds the binary, `LICENSE`, `README.md`, `BUILD.md`, `OPTIONS.md`, `THIRD-PARTY.md` and `LICENSES/`.
+This version's GitHub Release carries seven archives, three single files and an APK; each archive holds the binary, `LICENSE`, `README.md`, `BUILD.md`, `OPTIONS.md`, `THIRD-PARTY.md` and `LICENSES/`.
 
 | File | For |
 |---|---|
-| `chessenger-3.6-macos-arm64-pgo.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer (fastest) |
-| `chessenger-3.6-macos-x64-avx2.tar.gz` | Mac with Intel CPU with AVX2, macOS 10.9 or newer |
-| `chessenger-3.6-linux-arm64-pgo.tar.gz` | Linux, ARM64 (static) (fastest) |
-| `chessenger-3.6-linux-x64-avx2-pgo.tar.gz` | Linux, x86-64 with AVX2 (static) (fastest) |
-| `chessenger-3.6-windows-x64-avx2.zip` | Windows, most PCs from 2013 on (AVX2); the build rating lists usually use |
-| `chessenger-3.6-windows-x64-bmi2.zip` | Windows, Intel Haswell and newer, AMD Zen and newer (x86-64-v3) |
-| `chessenger-3.6-windows-arm64-pgo.zip` | Windows on ARM (ARM64) (fastest) |
-| `chessenger-3.6-windows-x32.zip` | Windows, 32-bit (needs SSE2): old PCs and 32-bit Windows |
+| `chessenger-4.2-macos-arm64-pgo.tar.gz` | Mac with Apple Silicon (M1 and newer), macOS 11 or newer (fastest) |
+| `chessenger-4.2-macos-x64-avx2.tar.gz` | Mac with Intel CPU with AVX2, macOS 10.9 or newer |
+| `chessenger-4.2-linux-arm64-pgo.tar.gz` | Linux, ARM64 (static) (fastest) |
+| `chessenger-4.2-linux-x64-avx2-pgo.tar.gz` | Linux, x86-64 with AVX2, BMI2 and FMA (static) (fastest) |
+| `chessenger-4.2-windows-x64-avx2.zip` | Windows, x86-64 with AVX2, BMI2 and FMA: Intel Haswell and newer, AMD Excavator and newer |
+| `chessenger-4.2-windows-arm64-pgo.zip` | Windows on ARM (ARM64) (fastest) |
+| `chessenger-4.2-windows-x32.zip` | Windows, 32-bit (needs SSE2): old PCs and 32-bit Windows |
+| `chessenger-4.2-android-arm64.apk` | Android chess apps (`ANDROID.md`) |
+| `chessenger-4.2-android-arm64` | Android phones and tablets, ARM64 (static), in Termux: see `ANDROID.md` |
+| `chessenger-4.2-ios.wasm` | iPhone and iPad, in a-Shell: see `IOS.md` |
+| `chessenger-4.2-ios-nosimd.wasm` | iPhone and iPad, without SIMD (about 2 times slower), if `ios.wasm` does not start |
 
 ### Which file?
 
@@ -67,15 +58,13 @@ The GitHub Release also gives the first-start steps for macOS, Linux and Windows
 
 ## Using Chessenger in a chess GUI (UCI)
 
-The engine reports itself as `id name Chessenger 3.6`.
+The engine reports itself as `id name Chessenger 4.2`.
 
 - UCI commands: `uci`, `isready`, `ucinewgame`, `position` (`startpos` or `fen`, then `moves`), `setoption`, `go` (`depth`, `wtime`, `btime`, `winc`, `binc`, `movestogo`, `movetime`, `nodes`, `mate`, `infinite`, `ponder`, `searchmoves`), `stop`, `ponderhit` and `quit`.
-- `debug` and `register` are accepted and change nothing.
 - `xboard` switches to the WinBoard/XBoard protocol (see [WinBoard/XBoard](#winboardxboard)).
 - `console` switches to the console mode for people (see [Console](#console)).
 - `help` lists `console`, `xboard`, `uci`, `bench`, `version` and `quit`; `version` prints the name, version, build and date.
 - For testing: `perft <N>` (N up to 8, also as `go perft <N>`), `divide <N>` (up to 6), `d` (prints the position), `eval`, `nnue` (network evaluation), `hash`, `bench [depth]` (default 15) and `bench levels` (the playing levels).
-- From the command line, after the name of the binary file: `bench [depth]`, `version`, `--help` and the words that start the console (see [Console](#console)).
 
 UCI options and the built-in tablebases are on a separate page: [OPTIONS.md](OPTIONS.md).
 
@@ -96,10 +85,10 @@ Put one of these words after the name of the binary file. The examples use the m
 same way, and after your own build `./chessenger`:
 
 ```
-./chessenger-3.6-macos-arm64-pgo console
-./chessenger-3.6-macos-arm64-pgo play white 5+3
-./chessenger-3.6-macos-arm64-pgo analyze
-./chessenger-3.6-macos-arm64-pgo annotate game.pgn 1
+./chessenger-4.2-macos-arm64-pgo console
+./chessenger-4.2-macos-arm64-pgo play white 5+3
+./chessenger-4.2-macos-arm64-pgo analyze
+./chessenger-4.2-macos-arm64-pgo annotate game.pgn 1
 ```
 
 - `console` opens the console; in a terminal it starts a game at once: you have White and no time limit, Chessenger has 1 min + 1 s and plays at about 1200 Elo (`strength full` for full strength).
@@ -107,12 +96,7 @@ same way, and after your own build `./chessenger`:
 - `analyze [FEN]` analyses the start position, or the position given as a FEN (in quotes), until you type `stop`.
 - `annotate FILE [S]` marks `?!`, `?` and `??` in game 1 of a PGN file, S seconds a move (default 1), and writes the result to `FILE-annotated.pgn`: for `game.pgn`, `game-annotated.pgn`.
 
-On Windows the same words follow the name of the `.exe` file, for example `chessenger-3.6-windows-x64-avx2.exe console`.
-`--help` lists the words, with `bench [DEPTH]` and `version`.
-
-Started without a word, the binary is in UCI mode and waits for a chess GUI; in a terminal it shows its banner and
-`Type 'help' for commands, 'console' for the interactive mode.` There `help` lists `console`, `xboard`, `uci`, `bench`, `version` and `quit`,
-and `console` opens the console.
+On Windows the same words follow the name of the `.exe` file, for example `chessenger-4.2-windows-x64-avx2.exe console`.
 
 On Windows, unpack the archive outside Program Files: `save` writes the game file to the folder Chessenger was started from, and there a normal user may not write.
 
@@ -134,7 +118,7 @@ Build steps for macOS, Linux, Windows, FreeBSD, OpenBSD and Linux on RISC-V are 
 
 ## Neural network
 
-- The network is our own, trained from scratch with bullet (MIT) on Chessenger's own games and on [Leela Chess Zero training data](https://storage.lczero.org/files/training_data/), which is made available under the [Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/1-0/).
+- The network is our own, trained from scratch with bullet (MIT) on Chessenger's own games, on [Leela Chess Zero training data](https://storage.lczero.org/files/training_data/) and on [Stockfish training data](https://huggingface.co/datasets/official-stockfish/master-binpacks) rescored by a Leela Chess Zero network, which are made available under the [Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/1-0/).
 - We offer, free of charge and in machine-readable form, the alteration file for the Leela Chess Zero training data as defined in section 4.6 b of the ODbL; request it by opening an issue at https://github.com/chessengeriadoteu/chessenger/issues.
 - The network architecture and inference code are adapted from Starzix 6.0.
 - With the UCI option `Use NNUE` set to `false`, the engine plays with its classic evaluation instead of the network, on one thread.

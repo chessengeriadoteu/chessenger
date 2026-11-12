@@ -10,8 +10,10 @@
 #include "xboard.h"
 #include "console_book.h"
 #include "syzygy.h"
+extern int multipv_setting;
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -25,6 +27,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
+#include <direct.h>
 #include <fcntl.h>
 #else
 #include <sys/ioctl.h>
@@ -33,12 +36,13 @@
 #include <poll.h>
 #endif
 
-#define ENGINE_VERSION "3.6"
+#define ENGINE_VERSION "4.2"
 
 #ifdef _WIN32
 
 void win_stdin_console(int on);
 void win_stdin_console_prompt(int cooked);
+int win_stdin_ready(void);
 #endif
 
 #define CON_PROMPT "chessenger> "
@@ -75,6 +79,12 @@ typedef enum {
 
     C_BENCH, C_AUTOPLAY, C_PAUSE, C_BOOK,
 
+    C_REPLAY,
+
+    C_SCROLL,
+
+    C_END,
+
     C_LATER
 } CommandId;
 
@@ -90,88 +100,115 @@ typedef struct {
     const char* more;
 } ConsoleCommand;
 
+#define STRENGTH_ELO_RANGE_TEXT "1200-2800"
+
+#ifdef __wasi__
+#define REPLAY_STOP_TEXT "Here (WebAssembly) it cannot be stopped: a small S, or 'first' and 'next' to step yourself."
+#else
+#define REPLAY_STOP_TEXT "Any line typed ('stop', a command) or Ctrl+C ends it; a command typed runs after it."
+#endif
+
+#define HELP_SENTENCES_FIRST "Simple sentences work too: show board, who is winning, take back, how much time do I have."
+#define HELP_SENTENCES_RUN "'Understood as:' says which command runs."
+#ifdef __wasi__
+#define HELP_SENTENCES_TEXT HELP_SENTENCES_FIRST "\n" HELP_SENTENCES_RUN
+#else
+#define HELP_SENTENCES_NOTE "Each sentence is noted in ~/.chessenger-sentences.txt, on this computer only (nothing is sent); CHESSENGER_NO_NOTES=1 turns it off."
+#define HELP_SENTENCES_TEXT HELP_SENTENCES_FIRST "\n" HELP_SENTENCES_RUN "\n" HELP_SENTENCES_NOTE
+#endif
+
 static const ConsoleCommand COMMANDS[] = {
 
-    { "play",     G_GAME, true,  true,  C_PLAY,  "play [white|black] [T]", "new game against Chessenger (T: 2+1, 10, 40/90)", "play white 2+1, play black 10, play black 1+1 2+1, play", "You take White unless you say black. T as in 'help time' (default: 'time'); two values: White's, then Black's." },
+    { "play",     G_GAME, true,  true,  C_PLAY,  "play [white|black] [T]", "new game against Chessenger (T: 2+1, 10, 40/90)", "play white 2+1, play black 10, play black 1+1 2+1, play white infinite 1+1, play", "You take White unless you say black.\nT is a time control as in 'help time'. Without T: the 'time' setting.\nTwo values: White's time, then Black's.\n'infinite' (no time limit) is for your side only." },
     { "<move>",   G_GAME, true,  false, C_MOVE,  "<move>", "play a move: Nf3, exd5, O-O, e8=Q or g1f3", "e4, then Nf3 or g1f3 (outside a game several moves: e4 e5 Nf3)", "A square alone (d5) or a capture (xd5) plays the only legal move onto it." },
 
-    { "new",      G_GAME, true,  true,  C_NEW,   "new", "new game from the start position, your last color", "new", "The board of the start first. You keep your color of the last game (also after 'switch'); before any game: White. Time: the 'time' setting (the start of the console: you without a limit, Chessenger 1+1)." },
-    { "undo",     G_GAME, true,  true,  C_UNDO,  "undo [N]", "take back N moves (default: yours and the reply)", "undo, undo 2  (alias: back)", "Outside a game N counts half-moves. After 'new' or 'setboard' there is nothing to take back." },
-    { "redo",     G_GAME, true,  true,  C_REDO,  "redo [N]", "replay moves taken back", "redo, redo 2", "Counts like 'undo'. A new move, 'new', 'setboard' or 'play' clears what can be replayed." },
+    { "new",      G_GAME, true,  true,  C_NEW,   "new", "new game from the start position, your last color", "new", "The board at the start is shown first.\nYou keep the color of your last game (also after 'switch'); before any game: White.\nTime: the 'time' setting. At a terminal, until you set 'time': no limit for you, 1+1 for Chessenger." },
+    { "undo",     G_GAME, true,  true,  C_UNDO,  "undo [N]", "take back N moves (default: yours and the reply)", "undo, undo 2  (alias: back)", "Outside a game N counts half-moves.\nAfter 'new' or 'setboard' there is nothing to take back." },
+    { "redo",     G_GAME, true,  true,  C_REDO,  "redo [N]", "replay moves taken back", "redo, redo 2", "Counts like 'undo'.\nA new move, 'new', 'setboard' or 'play' clears what can be replayed." },
     { "switch",   G_GAME, true,  true,  C_SWITCH, "switch", "swap sides: Chessenger moves now", "switch", NULL },
 
-    { "hint",     G_GAME, true,  true,  C_HINT,  "hint [S]", "show the move Chessenger suggests for you", "hint, hint 10, hint 0.5", "Nothing is played. S: Chessenger thinks S seconds (0.1-3600); without S: 1 second, or the depth or nodes of 'time'. In a game your clock runs meanwhile; 'stop' or Ctrl+C gives the move at once. Outside a game: for the side to move. In a book position (book on) first the book moves, as 'book' lists them. In a tablebase position (see 'syzygy'): the move and the result of the tables, no search." },
-    { "resign",   G_GAME, true,  true,  C_RESIGN, "resign | draw", "resign the game, or offer a draw", "resign", NULL },
+    { "hint",     G_GAME, true,  true,  C_HINT,  "hint [S]", "a hint in three steps: direction, piece, move", "hint, hint 10, hint 0.5", "Nothing is played.\nIn the same position each 'hint' tells more:\n  step 1: the kind of move and the score,\n  step 2: the piece to move,\n  step 3: the move and why (main line, material, mate).\nEverything comes from the search and the position, nothing else.\nS: Chessenger thinks S seconds (0.1-3600).\nWithout S: 1 second, or the depth or nodes of 'time'.\nSteps 2 and 3 reuse the search of step 1. An S longer than before searches again.\nIn a game your clock runs while Chessenger thinks.\n'stop' or Ctrl+C gives the hint at once.\nHelp is counted only in your game against Chessenger (a hint or an eval outside a game does not count).\nEach position counts once, with whether the move itself was shown.\nThe count shows after each hint; when the game ends, you get a summary.\nOutside a game: for the side to move.\nIn a book position (book on) step 3 shows the book moves first, as 'book' lists them.\nIn a tablebase position (see 'syzygy'): the move and the result of the tables, no search." },
+    { "resign",   G_GAME, true,  true,  C_RESIGN, "resign | draw", "resign the game, or offer a draw", "resign", "resign: you give up. The game ends at once and Chessenger wins.\nTo offer a draw, see 'help draw'." },
     { "draw",     G_GAME, true,  true,  C_DRAW,  "resign | draw", "resign the game, or offer a draw", "draw e4  (or 'draw', then your move)", "The offer goes with your move; Chessenger accepts when its score is 0.00 or less." },
 
-    { "pause",    G_GAME, true,  true,  C_PAUSE, "pause", "stop the clocks until your move or 'pause' again", "pause", "In a game with clocks, on your turn: your time does not run while paused. Your move or 'pause' again starts the clocks." },
-    { "clock",    G_GAME, true,  true,  C_CLOCK, "clock", "show both clocks", "clock", NULL },
-    { "time",     G_GAME, true,  true,  C_TIME,  "time T [T2]", "2+1 | 40/90+30 | move 5 | depth 12 | nodes N", "time 2+1, time 10, time 40/90, time 5+3 1+1, time move 5, st 5", "2+1: 2 minutes, 1 second added a move (the default). First value White's, second Black's (time 10 1+1: White 10 min, Black 1 min + 1 s). 0+20: no time at the start, 20 s added after every move. At the start of the console: you without a limit, Chessenger 1+1, until you set 'time'. Before the first move of a game it holds at once, later from the next game ('new'). Aliases: level T; st S = move S, sd N = depth N, sn N = nodes N." },
+    { "end",      G_GAME, true,  true,  C_END,   "end", "stop the game now: unfinished (*), no one wins", "end", "Works at any moment of a game: on your move, while Chessenger thinks, in autoplay and while paused.\nNot a resignation and not a draw: the result is * (unfinished).\nThe prompt comes back at once: 'analyze', 'annotate', 'save', 'history' or 'new'." },
 
-    { "autoplay", G_GAME, true,  true,  C_AUTOPLAY, "autoplay [T [T2]]", "Chessenger plays itself from the start position", "autoplay, autoplay 1+1, autoplay 2+1 1+1", "The board after each move; 'stop' or Ctrl+C ends it (result *). Both sides at full strength ('skill', 'elo' and 'strength' set your games), T and T2 as in 'time' (default: 'time'). Then 'save', 'history', 'first', 'prev', 'next'." },
-    { "load",     G_GAME, true,  true,  C_LOAD,  "load FILE [N]", "load game N (default 1) from a PGN file", "load games.pgn 2, load My Games/today.pgn", "The board shows the start of the game; 'next' steps through it. A move typed on the way cuts the rest off ('load' again brings it back)." },
-    { "save",     G_GAME, true,  true,  C_SAVE,  "save [FILE]", "save the game as PGN (default: chessenger-DATE.pgn)", "save game.pgn, save, save My Games/today.pgn", "The moves 'history' lists. A file that exists keeps its games; this one is added at the end." },
-    { "first",    G_GAME, true,  true,  C_FIRST, "first|prev|next|last", "step through the game; prev and next take a count", "first", "Steps through the moves of 'history' and those taken back ('load', 'undo'); in a finished game too, not in one going on." },
-    { "prev",     G_GAME, true,  true,  C_PREV, "first|prev|next|last", "step through the game; prev and next take a count", "prev, prev 3", "Steps through the moves of 'history' and those taken back ('load', 'undo'); in a finished game too, not in one going on." },
-    { "next",     G_GAME, true,  true,  C_NEXT, "first|prev|next|last", "step through the game; prev and next take a count", "next, next 10", "Steps through the moves of 'history' and those taken back ('load', 'undo'); in a finished game too, not in one going on." },
-    { "last",     G_GAME, true,  true,  C_LAST, "first|prev|next|last", "step through the game; prev and next take a count", "last", "Steps through the moves of 'history' and those taken back ('load', 'undo'); in a finished game too, not in one going on." },
-    { "goto",     G_GAME, true,  true,  C_GOTO,  "goto M", "jump to move M: goto 12 (White), goto 12... (Black)", "goto 12, goto 12..., goto 0", "The position after that move; 'goto 0' = the start. As 'next': not in a game going on." },
+    { "pause",    G_GAME, true,  true,  C_PAUSE, "pause", "stop the clocks; 'pause' again starts them", "pause", "Works in any game going on: on your move, while Chessenger thinks, and in autoplay.\nOn your move (a game with clocks): your time stops. Your move or 'pause' again starts the clocks.\nWhile Chessenger thinks, or in autoplay: it stops thinking at once and the time it used comes off its clock.\nIts move then waits. 'pause' again and it thinks on that move anew.\nWhile its move waits, the moves you type, 'undo', 'redo', 'switch' and 'draw' wait too.\n'end', 'new', 'play', 'autoplay' or (in autoplay) 'stop' end the game as usual." },
+    { "clock",    G_GAME, true,  true,  C_CLOCK, "clock", "show both clocks", "clock", NULL },
+    { "time",     G_GAME, true,  true,  C_TIME,  "time T [T2]", "2+1 | 40/90+30 | infinite | move 5 | depth 12", "time 2+1, time 10, time 40/90, time 5+3 1+1, time infinite 1+1, time move 5, st 5", "2+1: 2 minutes, plus 1 second added after every move (the default).\n10: 10 minutes, nothing added. 60 = 1 hour. 120+1 = 2 hours, plus 1 second a move.\n0+20: no time at the start, 20 seconds added after every move.\n40/90: 40 moves in 90 minutes. 40/90+30: the same, plus 30 seconds a move.\nTwo values: the first is White's time, the second Black's (time 10 1+1: White 10 minutes, Black 1 minute + 1 second).\ninfinite: no time limit, for you only. 'time infinite 1+1': you no limit, Chessenger 1+1. With Black: 'time 1+1 infinite'.\nChessenger always needs a finite time. 'infinite' for its side, or for both, is not accepted (also not in 'play' and 'autoplay').\nmove S: Chessenger takes S seconds a move, you have no clock. depth N: it searches N plies a move. nodes N: N nodes a move.\nAlone: the setting.\nAt a terminal the console starts with: no limit for you, 1+1 for Chessenger. This holds until you set 'time'.\nBefore the first move of a game a new 'time' holds at once; later it holds from the next game ('new').\nOther forms: level T; st S = move S; sd N = depth N; sn N = nodes N." },
+
+    { "autoplay", G_GAME, true,  true,  C_AUTOPLAY, "autoplay [T [T2]]", "Chessenger plays itself from the start position", "autoplay, autoplay 1+1, autoplay 2+1 1+1", "The board is shown after each move, the book moves a second apart. 'stop', 'end' or Ctrl+C ends it (the result is *, unfinished).\nBoth sides play at full strength ('skill', 'elo' and 'strength' set only your games).\nT, T2: time controls as in 'time', T for White and T2 for Black. Without them: the 'time' setting.\nBoth times must be finite: 'infinite' is not accepted here.\nAfterwards you can use 'save', 'history', 'first', 'prev' and 'next'." },
+    { "load",     G_GAME, true,  true,  C_LOAD,  "load FILE [N]", "load game N (default 1) from a PGN file", "load games.pgn 2, load My Games/today.pgn", "The board shows the start of the game; 'next' steps through it.\nA move you type on the way removes the rest of the game ('load' again brings it back)." },
+    { "save",     G_GAME, true,  true,  C_SAVE,  "save [FILE]", "save the game as PGN (default: chessenger-DATE.pgn)", "save game.pgn, save, save My Games/today.pgn", "It saves the moves that 'history' lists.\nIf FILE already exists, its games are kept and this game is added at the end." },
+    { "first",    G_GAME, true,  true,  C_FIRST, "first|prev|next|last", "to the start (before move 1), back, forward, to the end", "first", "Where each goes:\n  first: the start, before move 1 (as 'goto 0');\n  prev, next: one half-move back or forward; 'prev 3', 'next 10': that many;\n  last: after the last move;\n  goto M: after move M.\nThey step through the moves of 'history' and the moves you took back ('load', 'undo').\nThey work in a finished game, not in a game going on (there use 'undo' and 'redo')." },
+    { "prev",     G_GAME, true,  true,  C_PREV, "first|prev|next|last", "to the start (before move 1), back, forward, to the end", "prev, prev 3", "Where each goes:\n  first: the start, before move 1 (as 'goto 0');\n  prev, next: one half-move back or forward; 'prev 3', 'next 10': that many;\n  last: after the last move;\n  goto M: after move M.\nThey step through the moves of 'history' and the moves you took back ('load', 'undo').\nThey work in a finished game, not in a game going on (there use 'undo' and 'redo')." },
+    { "next",     G_GAME, true,  true,  C_NEXT, "first|prev|next|last", "to the start (before move 1), back, forward, to the end", "next, next 10", "Where each goes:\n  first: the start, before move 1 (as 'goto 0');\n  prev, next: one half-move back or forward; 'prev 3', 'next 10': that many;\n  last: after the last move;\n  goto M: after move M.\nThey step through the moves of 'history' and the moves you took back ('load', 'undo').\nThey work in a finished game, not in a game going on (there use 'undo' and 'redo')." },
+    { "last",     G_GAME, true,  true,  C_LAST, "first|prev|next|last", "to the start (before move 1), back, forward, to the end", "last", "Where each goes:\n  first: the start, before move 1 (as 'goto 0');\n  prev, next: one half-move back or forward; 'prev 3', 'next 10': that many;\n  last: after the last move;\n  goto M: after move M.\nThey step through the moves of 'history' and the moves you took back ('load', 'undo').\nThey work in a finished game, not in a game going on (there use 'undo' and 'redo')." },
+    { "goto",     G_GAME, true,  true,  C_GOTO,  "goto M", "jump to move M: goto 12 (White), goto 12... (Black)", "goto 12, goto 12..., goto 0", "The position after that move: 'goto 12' after White's 12th move, 'goto 12...' after Black's.\n'goto 0' = the start, before move 1 (as 'first'). 'last' goes to the end.\nNot in a game going on (as 'next')." },
+
+    { "replay",   G_GAME, true,  true,  C_REPLAY, "replay [white|black] [S]", "show the game move by move, S seconds apart", "replay, replay black, replay white 1, replay 0.5, replay black 0", "It shows the board at the start of the game, then after each move.\n'white' or 'black': the board seen from that side (default: as the board is turned now, see 'flip').\nS: seconds between two moves (0-3600, default 2; 0 = all boards at once).\nThe whole game is shown: the moves of 'history' and the moves ahead of the board (after 'load', 'undo' or 'prev').\n" REPLAY_STOP_TEXT "\nAfterwards the board stays where it was.\nNot in a game going on." },
     { "history",  G_GAME, true,  true,  C_HISTORY, "history", "list the moves played so far", "history", NULL },
 
-    { "board",    G_POSITION, true, true, C_BOARD, "board [size N|auto]", "show the board, side to move, material and FEN", "board, board size 3  (alias: d)", "Size: 'board size 1|2|3|4|auto'. With 'pieces shapes' a square of 3x1, 5x3, 6x3 or 8x4 characters, the piece centered on it; with letters or 'pieces unicode' 2x1, 4x2, 6x3 or 8x4, in 1 and 2 a piece is one character. Default: the biggest up to 3 that fits the terminal, 1 in a pipe. auto = the biggest that fits the terminal (2 with ASCII pieces), 1 in a pipe. 'board size' alone: the setting." },
-    { "fen",      G_POSITION, true, true, C_FEN, "fen", "print the FEN of the current position", "fen", NULL },
-    { "setboard", G_POSITION, true, true, C_SETBOARD, "setboard FEN", "set up a position (UCI 'position' also works)", "setboard 4k3/8/8/8/8/8/4P3/4K3 w - - 0 1", NULL },
+    { "board",    G_POSITION, true, true, C_BOARD, "board [size N|auto]", "show the board, side to move, material and FEN", "board, board size 3  (alias: d)", "Size: 'board size 1|2|3|4|auto'. 'board size' alone shows the setting.\nDefault: the biggest size up to 3 that fits the terminal; 1 in a pipe.\nauto: the biggest size that fits the terminal (2 with ASCII pieces); 1 in a pipe.\nSquare of sizes 1, 2, 3, 4 in characters (columns x rows), the piece centered on it:\n  colored squares, 'pieces unicode' or 'shapes': 3x1, 5x3, 6x3, 8x4\n  colored squares, 'pieces letters' or ASCII letters: 3x1, 5x3, 7x3, 9x5\n  without colored squares: 2x1, 4x2, 6x3, 8x4" },
+    { "fen",      G_POSITION, true, true, C_FEN, "fen", "print the FEN of the current position", "fen", "Then one line: who is to move, or how the position has ended (checkmate, stalemate, a draw)." },
+    { "setboard", G_POSITION, true, true, C_SETBOARD, "setboard FEN", "set up a position (UCI 'position' also works)", "setboard 4k3/8/8/8/8/8/4P3/4K3 w - - 0 1", "A FEN pasted alone, without 'setboard', works too.\nAfter the board one line says who is to move (and if in check), or how the position has ended: checkmate (who won), stalemate, a draw by too little material or by the 50-move rule.\nA FEN with the side not to move in check is refused: no legal game reaches it." },
     { "moves",    G_POSITION, true, true, C_MOVES, "moves", "list the legal moves", "moves", NULL },
     { "flip",     G_POSITION, true, true, C_FLIP, "flip", "turn the board around", "flip", NULL },
 
-    { "analyze",  G_ANALYSIS, true,  true, C_ANALYZE, "analyze", "analyze until 'stop'; typed moves are played", "analyze", "Scores from White's view. A line you type stops it, runs, and the analysis starts again on the new position; 'stop', Ctrl+C, 'play', 'uci' and 'quit' end it." },
+    { "analyze",  G_ANALYSIS, true,  true, C_ANALYZE, "analyze [N]", "analyze until 'stop', or N seconds; typed moves are played", "analyze, analyze 10, analyze 0.5", "Scores are from White's view.\nWithout N it runs until you type 'stop' or press Ctrl+C.\nA line you type stops it and runs. Then the analysis starts again on the new position (a move you type is played first).\n'stop', Ctrl+C, 'play', 'uci' and 'quit' end it.\nN: it runs N seconds (0.1-86400), then shows the best move. A move typed meanwhile starts N seconds again on the new position." },
     { "stop",     G_ANALYSIS, true,  true, C_STOP, "stop", "stop analyzing or thinking", "stop  (or Ctrl+C)", "While Chessenger thinks in a game it plays its best move at once." },
-    { "go",       G_ANALYSIS, true,  true, C_GO, "go [LIMITS]", "one search: go depth 20 | movetime 5000 | nodes N", "go depth 20, go movetime 5000, go", "Without limits: as the 'time' setting. Lines as in 'analyze'; nothing is played." },
-    { "eval",     G_ANALYSIS, true,  true, C_EVAL, "eval", "static evaluation in pawns, White's view", "eval  (alias: score)", "The number the search starts from in this position (no search)." },
-    { "mate",     G_ANALYSIS, true,  true, C_MATE, "mate N", "look for a mate in N moves", "mate 3", "Searches 2N-1 half-moves. 'No mate found' is not a proof: the search prunes." },
-    { "lines",    G_ANALYSIS, true,  true, C_LINES, "lines N", "show the N best lines", "lines 3  (alias: multipv)", "'analyze' and 'go' print N lines a depth, numbered. It is the option MultiPV, so a game uses it too (more time a move). Alone: the setting (default 1)." },
-    { "annotate", G_ANALYSIS, true,  true, C_ANNOTATE, "annotate FILE [S]", "mark ?! ? ?? in a PGN game, S seconds per move", "annotate game.pgn 1, annotate game.pgn, annotate", "Game 1 of FILE, without FILE the game on the board. Marks by the drop of the winning chances; written to FILE-annotated.pgn (added at the end). S also 'depth N'. Ctrl+C stops it and saves what is done." },
-    { "why",      G_ANALYSIS, true,  true, C_WHY, "why [MOVE]", "why a move is worse: the line against it", "why Nxe5, why", "MOVE: a move of the side to move; alone: the last move played, in the position before it. Two searches at full strength, timed as 'hint'; the line that refutes MOVE and its facts (mate, promotion, material). Not in a game going on." },
+    { "go",       G_ANALYSIS, true,  true, C_GO, "go [LIMITS]", "one search: go depth 20 | movetime 5000 | nodes N", "go depth 20, go movetime 5000, go", "Limits: depth N, movetime MS (milliseconds: 5000 = 5 seconds), nodes N.\nWithout limits: the search as set by 'time'.\nThe lines are shown as in 'analyze'. Nothing is played." },
 
-    { "skill",    G_ENGINE, true,  true, C_SKILL, "skill N", "strength level 1-10 (10 = full strength)", "skill 5", "Chessenger plays weaker in your games ('play'): level N is about 1000 + 200*N Elo (1 = 1200, 9 = 2800), by a shallower search and a random pick among its best lines. 'autoplay', 'analyze', 'go', 'hint' and 'annotate' keep full strength. Alone: the setting." },
-    { "elo",      G_ENGINE, true,  true, C_ELO, "elo N|full", "about N Elo (1200-2800); 'elo full' = full strength", "elo 1800, elo full", "Chessenger plays at about N Elo in your games ('play'); 'autoplay', 'analyze' and 'annotate' keep full strength. 'strength N' is the same as 'elo N'. Scale: engine Elo at blitz speed, set by games between engines; against humans not measured. 'elo full' (also 'elo max', 'strength full', 'skill 10') goes back to full strength." },
+    { "eval",     G_ANALYSIS, true,  true, C_EVAL, "eval [S]", "the score in pawns and in words, White's view", "eval, eval 5  (alias: score)", "First the static evaluation: the number the search starts from (no search).\nThen a search (S seconds, 0.1-3600; without S as 'hint'), one line each:\n  Search: its score, who stands better and how much;\n  Material: pawn 1, knight 3, bishop 3, rook 5, queen 9;\n  Main line: the best moves of both sides;\n  What decides: material or the position, and why;\n  Threat of mate: a mate the side not to move threatens (in 1 or 2 moves, found exactly).\nIn a game your clock runs while Chessenger searches.\nHelp is counted only in your game against Chessenger (an eval or a hint outside a game does not count).\nThe count shows after each eval; when the game ends, you get a summary." },
 
-    { "strength", G_ENGINE, true,  true, C_STRENGTH, "strength N|full", "as 'elo': about N Elo (1200-2800), or full strength", "strength 1500, strength full, strength", "The same as 'elo N': Chessenger plays at about N Elo in your games ('play'); 'autoplay', 'analyze', 'go', 'hint' and 'annotate' keep full strength. 'strength full' (also 'strength max', 'elo full', 'skill 10') goes back to full strength. Alone: the strength now ('skill', 'elo', 'strength')." },
+    { "mate",     G_ANALYSIS, true,  true, C_MATE, "mate [N] [S]", "look for a mate: in N moves, S seconds (default 3)", "mate, mate 3, mate 3 10, mate t 30", "Without N: a mate of any length.\nN: a mate in N moves or fewer (2N-1 half-moves searched).\nS: seconds (0.1-3600), 3 without S. The search ends as soon as a mate is found.\nA lone number is N ('mate 3'). To give only the time, use 't': 'mate t 30'.\n'No mate found' is not a proof: the search prunes." },
+    { "lines",    G_ANALYSIS, true,  true, C_LINES, "lines N", "show the N best lines", "lines 3  (alias: multipv)", "'analyze' and 'go' print N numbered lines for each depth.\nThis is the engine option MultiPV, so a game uses it too (Chessenger then needs more time a move).\nAlone: the setting (default 1)." },
+
+    { "annotate", G_ANALYSIS, true,  true, C_ANNOTATE, "annotate FILE [S] [all|every]", "mark ?! ? ?? ! !! !? in a PGN game, S seconds per move", "annotate game.pgn 1, annotate game.pgn 10 all, annotate game.pgn 1 every, annotate", "Game 1 of FILE. Without FILE: the game on the board.\nIt starts at the first move that leaves the opening book (a move order the book reaches another way counts too).\nIn a game against Chessenger only your moves are judged.\n'all' judges Chessenger's moves too (in autoplay and between two other players both sides are always judged).\n'every': a line for every move, book moves too (marked 'book', not judged), with its scores and the best move when it is another.\nBoth sides are judged. FILE-annotated.pgn gets the score after each move.\nEach position is searched on its own (the moves before it do not count for repetitions).\nMarks:\n  ?! ? ??: by the drop of the winning chances;\n  !: the only good move (the second best clearly worse);\n  !! and !?: a sacrifice that keeps the chances (!! also the only mate).\nWhile it runs it searches 2 lines (MultiPV 2).\nThe line names who moved. Scores are from White's view.\nThe result goes to FILE-annotated.pgn (added at the end of that file).\nS: seconds a move (0.1-3600, default 1). Instead of S you can give 'depth N' or 'nodes N'.\nCtrl+C stops it and saves what is done." },
+    { "why",      G_ANALYSIS, true,  true, C_WHY, "why [MOVE]", "why a move is worse: the line against it", "why Nxe5, why", "MOVE: a move of the side to move. Without MOVE: the last move played, judged in the position before it.\nIt makes two searches at full strength, with the time of 'hint'.\nIt shows the line that refutes MOVE and its facts (mate, promotion, material).\nNot in a game going on." },
+
+    { "skill",    G_ENGINE, true,  true, C_SKILL, "skill N", "strength level 1-10 (10 = full strength)", "skill 5", "In your games ('play') Chessenger plays weaker at a lower level.\nLevel N is about 1000 + 200*N Elo (1 = 1200, 9 = 2800); 10 = full strength.\nIt weakens itself by a shallower search and a random pick among its best lines.\n'autoplay', 'analyze', 'go', 'hint' and 'annotate' keep full strength.\nAlone: the setting." },
+    { "elo",      G_ENGINE, true,  true, C_ELO, "elo N|full", "about N Elo (" STRENGTH_ELO_RANGE_TEXT "); 'elo full' = full strength", "elo 1800, elo full", "In your games ('play') Chessenger plays at about N Elo.\n'autoplay', 'analyze', 'go', 'hint' and 'annotate' keep full strength.\n'strength N' is the same as 'elo N'.\nThe scale is engine Elo at blitz speed, set by games between engines. Against humans it is not measured.\n'elo full' (also 'elo max', 'strength full', 'skill 10') goes back to full strength.\nAlone: the strength now." },
+
+    { "strength", G_ENGINE, true,  true, C_STRENGTH, "strength N|full", "as 'elo': about N Elo (" STRENGTH_ELO_RANGE_TEXT "), or full strength", "strength 1500, strength full, strength", "The same as 'elo N': in your games ('play') Chessenger plays at about N Elo.\n'autoplay', 'analyze', 'go', 'hint' and 'annotate' keep full strength.\n'strength full' (also 'strength max', 'elo full', 'skill 10') goes back to full strength.\nAlone: the strength now, as set by 'skill', 'elo' or 'strength'." },
     { "hash",     G_ENGINE, true,  true, C_HASH, "hash MB", "hash table size in MB", "hash 256", "Without a number: the current size." },
-    { "network",  G_ENGINE, true,  true, C_NETWORK, "network", "the evaluation network: what it is, size, md5", "network", "One network at most, and the classical evaluation (hand-made terms) without it: the levels ('skill', 'elo') and 'set Use NNUE false' play on that one." },
+    { "network",  G_ENGINE, true,  true, C_NETWORK, "network", "the evaluation network: what it is, size, md5", "network", "At most one network is used at a time.\nThe levels ('skill', 'elo') and 'set Use NNUE false' play without it, with the classical evaluation (hand-made terms)." },
     { "threads",  G_ENGINE, true,  true, C_THREADS, "threads N", "number of search threads", "threads 4", "Without a number: the current setting." },
 #if TB_EMBEDDED
 
-    { "syzygy",   G_ENGINE, true,  true, C_SYZYGY, "syzygy PATH", "use Syzygy endgame tablebases from PATH", "syzygy /home/me/syzygy", "Several folders: separated by ':' (Windows: ';'). Built in: all 3-4 piece tables, on from the start; PATH replaces them, 'syzygy <empty>' goes back to them, 'set SyzygyProbeLimit 0' switches all off. Levels ('skill', 'elo') play without the built-in ones." },
+    { "syzygy",   G_ENGINE, true,  true, C_SYZYGY, "syzygy PATH", "use Syzygy endgame tablebases from PATH", "syzygy /home/me/syzygy", "Several folders: separated by ':' (Windows: ';').\nBuilt in: all 3-4 piece tables, on from the start.\nPATH replaces them. 'syzygy <empty>' goes back to the built-in ones.\n'set SyzygyProbeLimit 0' switches all tables off.\nLevels ('skill', 'elo') play without the built-in ones." },
 #elif TB_NEXT_TO_ENGINE
 
-    { "syzygy",   G_ENGINE, true,  true, C_SYZYGY, "syzygy PATH", "use Syzygy endgame tablebases from PATH", "syzygy /home/me/syzygy", "Several folders: separated by ':' (Windows: ';'). From the start: the tables in the folder 'tablebases' next to Chessenger, if there is one; PATH replaces them, 'syzygy <empty>' goes back to them, 'set SyzygyProbeLimit 0' switches all off. Levels ('skill', 'elo') play without those next to Chessenger." },
+    { "syzygy",   G_ENGINE, true,  true, C_SYZYGY, "syzygy PATH", "use Syzygy endgame tablebases from PATH", "syzygy /home/me/syzygy", "Several folders: separated by ':' (Windows: ';').\nFrom the start: the tables in the folder 'tablebases' next to Chessenger, if there is one.\nPATH replaces them. 'syzygy <empty>' goes back to those next to Chessenger.\n'set SyzygyProbeLimit 0' switches all tables off.\nLevels ('skill', 'elo') play without those next to Chessenger." },
 #else
-    { "syzygy",   G_ENGINE, true,  true, C_SYZYGY, "syzygy PATH", "use Syzygy endgame tablebases from PATH", "syzygy /home/me/syzygy", "Several folders: separated by ':' (Windows: ';'). Empty path: off." },
+    { "syzygy",   G_ENGINE, true,  true, C_SYZYGY, "syzygy PATH", "use Syzygy endgame tablebases from PATH", "syzygy /home/me/syzygy", "Several folders: separated by ':' (Windows: ';').\nEmpty path: off." },
 #endif
 
-    { "book",     G_ENGINE, true,  true, C_BOOK, "book [on|off]", "opening book of Chessenger's moves in games", "book, book off, book on", "Chessenger's opening lines (" CONSOLE_BOOK_LINES_TEXT ": named variations and its own lines), only for its moves in console games ('play', 'autoplay'), never in analysis or UCI mode; on by default. Alone: the setting and the book moves here." },
-    { "ponder",   G_ENGINE, true,  true, C_PONDER, "ponder on|off", "think on your time during a game", "ponder on, ponder off, ponder", "Off by default. While on, the line you type in a game has no arrows or history (Chessenger thinks). Alone: the setting and this game's guesses." },
+    { "book",     G_ENGINE, true,  true, C_BOOK, "book [on|off]", "opening book of Chessenger's moves in games", "book, book off, book on", "The book holds " CONSOLE_BOOK_LINES_TEXT " opening lines (named variations and Chessenger's own lines).\nChessenger uses it only for its own moves in console games ('play', 'autoplay'), never in analysis or in UCI mode.\nOn by default.\nAlone: the setting, and the book moves in the current position." },
+    { "ponder",   G_ENGINE, true,  true, C_PONDER, "ponder on|off", "think on your time during a game", "ponder on, ponder off, ponder", "Chessenger thinks during your time, on the reply it expects from you.\nOff by default.\nWhile it is on, the arrow keys (line editing and history) do not work in a game, because Chessenger is thinking.\nAlone: the setting and the guesses of this game." },
     { "set",      G_ENGINE, true,  true, C_SET, "set NAME VALUE", "set any engine option (same as setoption)", "set Move Overhead 100", "Option names as listed by 'options'; 'setoption name ...' also works." },
     { "options",  G_ENGINE, true,  true, C_OPTIONS, "options", "list engine options and their values", "options", NULL },
 
-    { "color",    G_DISPLAY, true,  true, C_COLOR, "color auto|on|off", "colors (auto: terminal only; NO_COLOR is honored)", "color on", "Also: color 16 | 256 | true. Alone: the setting and a sample of the scale." },
+    { "color",    G_DISPLAY, true,  true, C_COLOR, "color auto|on|off", "colors (auto: terminal only; NO_COLOR is honored)", "color on", "Also: 'color 16', 'color 256' or 'color true' (the number of colors: 16, 256, or 24-bit).\nAlone: the setting and a sample of the score colors." },
     { "theme",    G_DISPLAY, true,  true, C_THEME, "theme NAME", "dark, light (the default), mono or retro", "theme dark", NULL },
-    { "pieces",   G_DISPLAY, true,  true, C_PIECES, "pieces shapes|unicode|ascii", "piece symbols (default: shapes, ascii in a pipe)", "pieces shapes", "'pieces shapes' draws each piece centered on its colored square: in 'board size' 2 to 4 a drawing, in 1 one character in the middle of a square of 3 columns. Without the colored squares (no colors, 'theme mono' or 'retro'), without UTF-8, with 'pieces ascii' and in a pipe: letters. 'pieces unicode': the chess symbols of the font, in sizes 3 and 4 drawn over the square (the old Windows console shows empty boxes). Also: pieces auto = shapes at a terminal with UTF-8, otherwise ASCII." },
-    { "pov",      G_DISPLAY, true,  true, C_POV, "pov white|you", "score from White's view or yours in games", "pov you", "Default: white, the view of 'eval' and 'analyze'." },
-    { "post",     G_DISPLAY, true,  true, C_POST, "post on|off", "show the engine's thinking lines", "post on, post off", "In a game, one line for each depth Chessenger finishes: depth, score (as 'pov'), time, nodes, speed, main line. Off by default." },
+    { "pieces",   G_DISPLAY, true,  true, C_PIECES, "pieces shapes|letters|unicode|ascii", "piece symbols (default: unicode, ascii in a pipe)", "pieces unicode", "'pieces shapes': each piece is drawn centered on its colored square.\nIn 'board size' 2 to 4 it is a drawing; in size 1 one character in the middle of a square 3 columns wide.\n'pieces letters': like shapes, but with the letter of the piece (K Q R B N P) drawn in blocks, bigger on a bigger square.\nIn size 1: the letter in the middle of 3 columns.\n'pieces unicode' (the default at a terminal): on colored squares it looks like shapes.\nIn size 1 it is the chess symbol of the font in the middle of 3 columns.\n'pieces unicode' without colored squares: the chess symbols, in sizes 3 and 4 drawn over the square.\nThe old Windows console shows empty boxes for them.\n'pieces ascii': letters.\n'pieces auto': shapes at a terminal with UTF-8, otherwise ASCII.\n'shapes' and 'letters' need colored squares and UTF-8.\nWithout them (no colors, 'theme mono' or 'retro', no UTF-8, a pipe) you get letters, as 'ascii'." },
+    { "pov",      G_DISPLAY, true,  true, C_POV, "pov white|you", "score from White's view or yours in games", "pov you", "pov white: scores are always from White's view (the default, as in 'eval' and 'analyze').\npov you: in your games scores are from your view.\nAlone: the setting." },
+    { "post",     G_DISPLAY, true,  true, C_POST, "post on|off", "show the engine's thinking lines", "post on, post off", "In a game, one line for each depth Chessenger finishes: depth, score (as 'pov'), time, nodes, speed, main line.\nOff by default." },
+
+    { "scroll",   G_DISPLAY, true,  true, C_SCROLL, "scroll on|off", "off: board and thinking line stay in place", "scroll off, scroll on, scroll", "on (the default): every board and every thinking line on new lines; the window scrolls.\noff: after a move the board is drawn at the top of the window, and the thinking lines of 'analyze' and 'post on' write over each other on one line ('lines N': N lines).\nOnly at a terminal with colors: in a pipe, with 'color off', NO_COLOR or TERM=dumb all goes on new lines.\nAlone: the setting." },
     { "width",    G_DISPLAY, true,  true, C_WIDTH, "width N", "line width (default: terminal width or 80)", "width 72", NULL },
 
-    { "bench",    G_TOOLS, true,  true, C_BENCH, "bench [DEPTH]", "speed test; prints the node signature", "bench, bench 12  (alias: speed)", "The 50 positions of 'chessenger bench' to its depth or DEPTH (1-128), hash 128 MB: the same node count when the options are at their defaults ('options'). Not in a game going on. The board stays; the hash table is cleared and keeps its size. Ctrl+C does not stop it." },
+    { "bench",    G_TOOLS, true,  true, C_BENCH, "bench [DEPTH]", "speed test; prints the node signature", "bench, bench 12  (alias: speed)", "It searches the 50 positions of 'chessenger bench' to the default depth, or to DEPTH (1-128), with hash 128 MB.\nThe node count (the signature) is always the same when the options are at their defaults ('options').\nNot in a game going on.\nThe board stays. The hash table is cleared and keeps its size.\nCtrl+C does not stop it." },
     { "perft",    G_TOOLS, false, true, C_LATER, "perft N | divide N", "move generator test, total or per move", "perft 5", NULL },
     { "divide",   G_TOOLS, false, true, C_LATER, "perft N | divide N", "move generator test, total or per move", "divide 3", NULL },
 
     { "about",    G_INFO, true,  true,  C_ABOUT, "about", "name, version, build, authors", "about", NULL },
     { "version",  G_INFO, true,  true,  C_VERSION, "version", "name and version, one line", "version", NULL },
     { "license",  G_INFO, true,  true,  C_LICENSE, "license", "license (GNU GPL v3) and where to read it", "license", NULL },
-    { "help",     G_INFO, true,  false, C_HELP, "help [CMD|GROUP]", "this help", "help board, help game", NULL },
+    { "help",     G_INFO, true,  false, C_HELP, "help [CMD|GROUP]", "this help", "help board, help game", "help: all commands, by group.\nhelp GROUP: the commands of one group: Game, Position, Analysis, Engine, Display, Tools, Info.\nhelp CMD: one command, with an example and details.\n" HELP_SENTENCES_TEXT },
     { "uci",      G_INFO, true,  true,  C_UCI, "uci", "leave the console, back to UCI mode for GUIs", "uci", NULL },
-    { "xboard",   G_INFO, true,  true,  C_XBOARD, "xboard","switch to the WinBoard/XBoard protocol", "xboard", NULL },
+
+    { "xboard",   G_INFO, true,  true,  C_XBOARD, "xboard","switch to the WinBoard/XBoard protocol", "xboard", "'uci' or 'console' typed there brings you back to UCI mode or the console." },
     { "quit",     G_INFO, true,  true,  C_QUIT, "quit", "leave Chessenger", "quit  (alias: exit)", NULL },
 };
 #define COMMAND_COUNT ((int)(sizeof(COMMANDS) / sizeof(COMMANDS[0])))
@@ -198,8 +235,17 @@ static bool con_exit_hook = false;
 
 typedef enum { CM_AUTO, CM_ON, CM_OFF, CM_16, CM_256, CM_TRUE } ColorMode;
 typedef enum { TH_DARK, TH_LIGHT, TH_MONO, TH_RETRO, TH_COUNT } Theme;
-typedef enum { PC_AUTO, PC_UNICODE, PC_ASCII, PC_SHAPES } PieceMode;
+typedef enum { PC_AUTO, PC_UNICODE, PC_ASCII, PC_SHAPES, PC_LETTERS } PieceMode;
 static const char* const THEME_NAME[TH_COUNT] = { "dark", "light", "mono", "retro" };
+typedef enum {
+    R_WHITE, R_BLACK, R_EMPTY, R_FRAME, R_HILITE,
+    R_EVAL0, R_GAIN1, R_GAIN2, R_GAIN3, R_GAIN4, R_LOSS1, R_LOSS2, R_LOSS3, R_LOSS4,
+    R_THINK,
+    R_COMMAND,
+    R_LABEL,
+    R_COUNT,
+    R_NONE = -1
+} Role;
 
 static ColorMode con_color = CM_AUTO;
 
@@ -269,6 +315,10 @@ static bool game_auto = false;
 
 static bool clock_paused = false;
 
+static bool pause_req = false;
+static bool eng_paused = false;
+static bool pause_echo = false;
+
 static bool book_on = true;
 static bool book_out = false;
 static TimeControl game_tc[2];
@@ -300,9 +350,14 @@ static SearchKind search_kind = SK_NONE;
 static struct timeval search_started;
 static bool res_info = false, res_mate = false, res_move_ok = false;
 static int res_cp = 0, res_mate_moves = 0;
+static bool res2_info = false, res2_mate = false;
+static int res2_cp = 0, res2_mate_moves = 0;
 static Move res_move;
 static char res_refused[96] = "";
 static bool con_post = false;
+static bool con_scroll = true;
+
+static int post_block = 0;
 static bool post_rows = false;
 static char search_fen[128] = "";
 static int bound_cols = 0;
@@ -314,6 +369,45 @@ static bool analysis_on = false;
 static bool analysis_first = false;
 static char own_go[96] = "";
 static int mate_target = 0;
+
+static long mate_cap_ms = 0;
+static bool mate_capped = false, mate_any = false;
+
+static bool load_to_move = false;
+
+typedef enum { AS_HINT, AS_EVAL } AssistKind;
+static AssistKind assist_next = AS_HINT;
+
+static struct {
+    bool have;
+    uint64_t hash;
+    int hist;
+    int level;
+    long ms;
+    Move move;
+    bool mate;
+    int cp, mate_moves, depth;
+    char fen[128], pv[1024];
+} hint_memo;
+static int hint_level_next = 1;
+static long assist_ms = 0;
+
+static int assist_positions = 0, assist_shown = 0, assist_evals = 0;
+static bool assist_last_shown = false;
+static uint64_t assist_last_hash = 0;
+static int assist_last_hist = -1;
+
+static void assist_count_text(char* buf, size_t n) {
+    char h[96], e[40];
+    if (assist_positions == 0) snprintf(h, sizeof(h), "no hint");
+    else if (assist_positions == 1) snprintf(h, sizeof(h), "hints in 1 position (%s)",
+                                             assist_shown ? "move shown" : "move not shown");
+    else snprintf(h, sizeof(h), "hints in %d positions (move shown in %d)", assist_positions, assist_shown);
+    if (assist_evals == 0) snprintf(e, sizeof(e), "no evaluation");
+    else snprintf(e, sizeof(e), "%d evaluation%s", assist_evals, assist_evals == 1 ? "" : "s");
+    snprintf(buf, n, "%s, %s", h, e);
+}
+
 static bool queued_shown = false;
 static volatile sig_atomic_t con_interrupt = 0;
 static bool search_interrupted = false;
@@ -335,11 +429,12 @@ static int ponder_guesses = 0, ponder_hits = 0;
 
 typedef enum { OWN_NEWGAME, OWN_POSITION, OWN_START, OWN_ENGINE, OWN_HINT, OWN_BOARD,
                OWN_ANALYZE, OWN_GO, OWN_MATE, OWN_SHOW, OWN_ANNOTATE, OWN_RESTORE, OWN_QUIT,
-               OWN_WHY, OWN_HASH, OWN_SETBOARD } OwnStep;
+               OWN_WHY, OWN_HASH, OWN_SETBOARD, OWN_LINES } OwnStep;
 
 #define OWN_MAX 8
 static OwnStep own_queue[OWN_MAX];
 static int own_count = 0;
+static int own_lines = 1;
 static char own_fen[256];
 static void own_push(OwnStep step);
 
@@ -404,7 +499,19 @@ static const char* split_word(const char* s, char* word, size_t n, bool lower) {
     return s;
 }
 
-static void print_wrapped(const char* text, int indent, const char* prefer) {
+static bool move_number_glue(const char* s, int i) {
+    if (strncmp(s + i + 1, "...", 3) == 0 && (s[i + 4] == '\0' || s[i + 4] == ' ')) return true;
+    int j = i - 1, dots = 0, digits = 0;
+    while (j >= 0 && s[j] == '.') { dots++; j--; }
+    while (j >= 0 && isdigit((unsigned char)s[j])) { digits++; j--; }
+    return dots > 0 && digits > 0 && (j < 0 || s[j] == ' ');
+}
+
+static void put_head_line(const char* s, int n, Role role, int from, int len);
+static void put_role(Role role, const char* text);
+
+static void print_wrapped_head(const char* text, int indent, const char* prefer, Role role, int head_from,
+                               int head_len) {
     const int width = line_width();
     int used = 0;
     const char* s = text;
@@ -412,7 +519,8 @@ static void print_wrapped(const char* text, int indent, const char* prefer) {
         const int room = width - used;
         const int len = (int)strlen(s);
         if (len <= room) {
-            printf("%s\n", s);
+            if (s == text) put_head_line(s, len, role, head_from, head_len);
+            else printf("%s\n", s);
             return;
         }
         int cut = -1;
@@ -422,15 +530,22 @@ static void print_wrapped(const char* text, int indent, const char* prefer) {
                 if (strncmp(s + i, prefer, pl) == 0) cut = i;
         }
         for (int i = room; i > 0 && cut < 0; i--)
+            if (s[i] == ' ' && !move_number_glue(s, i)) cut = i;
+        for (int i = room; i > 0 && cut < 0; i--)
             if (s[i] == ' ') cut = i;
         if (cut < 0) cut = room > 0 ? room : 1;
-        printf("%.*s\n", cut, s);
+        if (s == text) put_head_line(s, cut, role, head_from, head_len);
+        else printf("%.*s\n", cut, s);
         s += cut;
         while (*s == ' ') s++;
         if (!*s) return;
         printf("%*s", indent, "");
         used = indent;
     }
+}
+
+static void print_wrapped(const char* text, int indent, const char* prefer) {
+    print_wrapped_head(text, indent, prefer, R_NONE, 0, 0);
 }
 
 static void print_two_part(const char* first, const char* second) {
@@ -440,6 +555,23 @@ static void print_two_part(const char* first, const char* second) {
     }
     print_wrapped(first, 0, NULL);
     print_wrapped(second, 0, NULL);
+}
+
+#define LABEL_COL 19
+static void print_label(const char* label, const char* prefer, const char* fmt, ...) {
+    char text[1400], buf[1440];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    snprintf(buf, sizeof(buf), "%-*s%s", LABEL_COL, label, text);
+    print_wrapped_head(buf, LABEL_COL, prefer, R_LABEL, 0, (int)strlen(label));
+}
+
+static void print_command(const char* command, const char* text) {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "  %-*s%s", LABEL_COL - 2, command, text);
+    print_wrapped_head(buf, LABEL_COL, NULL, R_COMMAND, 2, (int)strlen(command));
 }
 
 #define ECHO_MAX 40
@@ -455,6 +587,7 @@ typedef struct {
     int col, indent, width, sep;
     bool line_has_word;
     bool space_first;
+    Role role;
 } Wrap;
 
 static void wrap_start(Wrap* w, const char* first, int indent, int sep, bool space_first) {
@@ -463,6 +596,7 @@ static void wrap_start(Wrap* w, const char* first, int indent, int sep, bool spa
     w->sep = sep;
     w->line_has_word = false;
     w->space_first = space_first;
+    w->role = R_NONE;
     fputs(first, stdout);
     w->col = (int)strlen(first);
 }
@@ -479,7 +613,8 @@ static void wrap_word(Wrap* w, const char* word) {
         printf("%*s", w->sep, "");
         w->col += w->sep;
     }
-    fputs(word, stdout);
+    if (w->role == R_NONE) fputs(word, stdout);
+    else put_role(w->role, word);
     w->col += len;
     w->line_has_word = true;
 }
@@ -572,13 +707,6 @@ static void print_caught(void) {
     }
 }
 
-typedef enum {
-    R_WHITE, R_BLACK, R_EMPTY, R_FRAME, R_HILITE,
-    R_EVAL0, R_GAIN1, R_GAIN2, R_GAIN3, R_GAIN4, R_LOSS1, R_LOSS2, R_LOSS3, R_LOSS4,
-    R_THINK,
-    R_COUNT
-} Role;
-
 typedef struct {
     signed char bold, faint, reverse;
     short fg16, bg16, fg256, bg256;
@@ -590,18 +718,20 @@ static const Style STYLE[TH_COUNT][R_COUNT] = {
         [R_WHITE]  = S_(1, 0, 0, 97, -1, 231, -1),
         [R_BLACK]  = S_(0, 0, 0, 33, -1, 214, -1),
         [R_EMPTY]  = S_(0, 0, 0, 90, -1, 242, -1),
-        [R_FRAME]  = S_(0, 0, 0, 90, -1, 245, -1),
+        [R_FRAME]  = S_(0, 0, 0, 37, -1, 248, -1),
         [R_HILITE] = S_(0, 0, 0, 30, 43, 16, 220),
-        [R_EVAL0]  = S_(0, 0, 0, 94, -1, 75, -1),
+        [R_EVAL0]  = S_(0, 0, 0, 36, -1, 75, -1),
         [R_GAIN1]  = S_(0, 0, 0, 32, -1, 151, -1),
         [R_GAIN2]  = S_(0, 0, 0, 32, -1, 114, -1),
         [R_GAIN3]  = S_(1, 0, 0, 92, -1, 40, -1),
         [R_GAIN4]  = S_(1, 0, 0, 92, -1, 46, -1),
-        [R_LOSS1]  = S_(0, 0, 0, 31, -1, 217, -1),
-        [R_LOSS2]  = S_(0, 0, 0, 31, -1, 210, -1),
+        [R_LOSS1]  = S_(0, 0, 0, 91, -1, 217, -1),
+        [R_LOSS2]  = S_(0, 0, 0, 91, -1, 210, -1),
         [R_LOSS3]  = S_(1, 0, 0, 91, -1, 203, -1),
         [R_LOSS4]  = S_(1, 0, 0, 91, -1, 196, -1),
         [R_THINK]  = S_(0, 0, 0, 95, -1, 177, -1),
+        [R_COMMAND] = S_(0, 0, 0, 96, -1, 80, -1),
+        [R_LABEL]  = S_(0, 0, 0, 37, -1, 250, -1),
     },
     [TH_LIGHT] = {
         [R_WHITE]  = S_(1, 0, 0, 34, -1, 18, -1),
@@ -609,7 +739,8 @@ static const Style STYLE[TH_COUNT][R_COUNT] = {
         [R_EMPTY]  = S_(0, 0, 0, 90, -1, 247, -1),
         [R_FRAME]  = S_(0, 0, 0, 90, -1, 240, -1),
         [R_HILITE] = S_(0, 0, 0, 30, 102, 16, 185),
-        [R_EVAL0]  = S_(0, 0, 0, 94, -1, 63, -1),
+        [R_EVAL0]  = S_(0, 0, 0, 36, -1, 31, -1),
+
         [R_GAIN1]  = S_(0, 0, 0, 32, -1, 71, -1),
         [R_GAIN2]  = S_(0, 0, 0, 32, -1, 34, -1),
         [R_GAIN3]  = S_(1, 0, 0, 32, -1, 28, -1),
@@ -619,6 +750,9 @@ static const Style STYLE[TH_COUNT][R_COUNT] = {
         [R_LOSS3]  = S_(1, 0, 0, 31, -1, 124, -1),
         [R_LOSS4]  = S_(1, 0, 0, 31, -1, 88, -1),
         [R_THINK]  = S_(0, 0, 0, 35, -1, 91, -1),
+        [R_COMMAND] = S_(0, 0, 0, 36, -1, 30, -1),
+        [R_LABEL]  = S_(0, 0, 0, 90, -1, 243, -1),
+
     },
     [TH_MONO] = {
         [R_WHITE]  = S_(1, 0, 0, -1, -1, -1, -1),
@@ -636,6 +770,8 @@ static const Style STYLE[TH_COUNT][R_COUNT] = {
         [R_LOSS3]  = S_(1, 0, 0, -1, -1, -1, -1),
         [R_LOSS4]  = S_(1, 0, 0, -1, -1, -1, -1),
         [R_THINK]  = S_(1, 0, 0, -1, -1, -1, -1),
+        [R_COMMAND] = S_(1, 0, 0, -1, -1, -1, -1),
+        [R_LABEL]  = S_(0, 0, 0, -1, -1, -1, -1),
     },
     [TH_RETRO] = {
         [R_WHITE]  = S_(1, 0, 0, 92, -1, 46, -1),
@@ -653,6 +789,8 @@ static const Style STYLE[TH_COUNT][R_COUNT] = {
         [R_LOSS3]  = S_(1, 0, 0, 92, -1, 46, -1),
         [R_LOSS4]  = S_(1, 0, 0, 92, -1, 46, -1),
         [R_THINK]  = S_(0, 0, 0, 92, -1, 46, -1),
+        [R_COMMAND] = S_(0, 0, 0, 92, -1, 46, -1),
+        [R_LABEL]  = S_(0, 0, 0, 32, -1, 28, -1),
     },
 };
 #undef S_
@@ -663,7 +801,7 @@ typedef struct {
 } BoardPalette;
 static const BoardPalette BOARD_PALETTE[TH_LIGHT + 1] = {
     [TH_DARK]  = { 46, 44, 97, 30, -1,    67, 60, 231, 16, -1 },
-    [TH_LIGHT] = { 47, 43, 34, 30, 94,   230, 180, 20, 16, 63 },
+    [TH_LIGHT] = { 47, 43, 34, 30, 36,   230, 180, 20, 16, 31 },
 };
 
 static int detected_depth(void) {
@@ -703,6 +841,26 @@ static const char* color_auto_reason(void) {
     const char* term = getenv("TERM");
     if (term && strcmp(term, "dumb") == 0) return "TERM=dumb";
     return "terminal";
+}
+
+static bool screen_ansi(void) {
+    if (!isatty(STDOUT_FILENO) || color_depth() == 0 || env_set("NO_COLOR")) return false;
+#ifdef _WIN32
+    if (!w_vt) return false;
+#else
+    const char* term = getenv("TERM");
+    if (term && strcmp(term, "dumb") == 0) return false;
+#endif
+    return true;
+}
+
+static bool screen_in_place(void) {
+    return !con_scroll && screen_ansi();
+}
+
+static void screen_top(void) {
+    if (!screen_in_place()) return;
+    fputs("\033[H\033[2J", stdout);
 }
 
 static void rgb_of_256(int idx, int* r, int* g, int* b) {
@@ -803,6 +961,30 @@ static void put_styled(Role role, const char* text) {
     style_off();
 }
 
+static bool style_plain(Role role) {
+    const Style* s = &STYLE[con_theme][role];
+    return s->bold <= 0 && s->faint <= 0 && s->reverse <= 0 && s->fg16 < 0 && s->bg16 < 0 && s->fg256 < 0 &&
+           s->bg256 < 0;
+}
+
+static void put_head_line(const char* s, int n, Role role, int from, int len) {
+    if (role == R_NONE || len <= 0 || from >= n || color_depth() == 0 || style_plain(role)) {
+        printf("%.*s\n", n, s);
+        return;
+    }
+    const int end = from + len < n ? from + len : n;
+    printf("%.*s", from, s);
+    style_on(role, NULL);
+    printf("%.*s", end - from, s + from);
+    style_off();
+    printf("%.*s\n", n - end, s + end);
+}
+
+static void put_role(Role role, const char* text) {
+    if (color_depth() == 0 || style_plain(role)) fputs(text, stdout);
+    else put_styled(role, text);
+}
+
 static Role eval_role(int cp, int mate) {
     if (mate != 0) return mate > 0 ? R_GAIN4 : R_LOSS4;
     int a = cp < 0 ? -cp : cp;
@@ -881,7 +1063,7 @@ static void console_at_exit(void) {
 }
 
 static bool shapes_on(void) {
-    return con_pieces == PC_SHAPES || con_pieces == PC_AUTO;
+    return con_pieces == PC_SHAPES || con_pieces == PC_AUTO || con_pieces == PC_LETTERS;
 }
 
 static bool unicode_pieces(void) {
@@ -1006,6 +1188,7 @@ static void game_stop(void) {
     draw_offer = false;
     game_viewed = game_viewed_time = false;
     clock_paused = false;
+    pause_req = eng_paused = pause_echo = false;
     game_auto = false;
 }
 
@@ -1013,6 +1196,8 @@ static void game_view_keep(void) {
     if (game_on && game_over) {
         game_viewed = true;
         game_viewed_time = game_time_end;
+
+        redo_clear();
     }
 }
 
@@ -1115,6 +1300,54 @@ static const char* status_text(Status st, Color to_move) {
     }
 }
 
+static void print_to_move(Position* pos) {
+    const char* side = pos->to_move == WHITE ? "White" : "Black";
+    const char* other = pos->to_move == WHITE ? "Black" : "White";
+    char t[200];
+    switch (position_status(pos)) {
+        case ST_MATE:
+            snprintf(t, sizeof(t), "Checkmate: %s wins (%s is mated). The game is over.", other, side);
+            break;
+        case ST_STALEMATE:
+            snprintf(t, sizeof(t), "Stalemate: %s to move has no legal move and is not in check. Draw.", side);
+            break;
+        case ST_DRAW_MATERIAL:
+            snprintf(t, sizeof(t), "Draw: neither side has enough material to mate (%s to move).", side);
+            break;
+        case ST_DRAW_50:
+            snprintf(t, sizeof(t), "Draw by the 50-move rule: no capture or pawn move in 50 moves (%s to move).", side);
+            break;
+        case ST_DRAW_REP:
+            snprintf(t, sizeof(t), "Draw by threefold repetition (%s to move).", side);
+            break;
+        case ST_CHECK:
+            snprintf(t, sizeof(t), "%s to move, in check.", side);
+            break;
+        default:
+            snprintf(t, sizeof(t), "%s to move.", side);
+            break;
+    }
+
+    const char* s = t;
+    for (int room = line_width();; room = line_width() - 2) {
+        int cut = (int)strlen(s);
+        if (room < 20) room = 20;
+        if (cut > room) {
+            cut = room;
+            while (cut > 0 && s[cut] != ' ') cut--;
+            if (cut == 0) cut = room;
+        }
+        char piece[200];
+        snprintf(piece, sizeof(piece), "%.*s", cut, s);
+        put_styled(R_HILITE, piece);
+        putchar('\n');
+        s += cut;
+        while (*s == ' ') s++;
+        if (!*s) break;
+        fputs("  ", stdout);
+    }
+}
+
 static bool parse_count(const char* s, size_t n, long lo, long hi, long* out) {
     if (n == 0 || n > 9) return false;
     long v = 0;
@@ -1128,6 +1361,10 @@ static bool parse_count(const char* s, size_t n, long lo, long hi, long* out) {
 }
 
 static bool parse_clock_text(const char* w, TimeControl* tc) {
+    if (strcasecmp(w, "infinite") == 0 || strcasecmp(w, "inf") == 0) {
+        *tc = TC_NO_LIMIT;
+        return true;
+    }
     const char* slash = strchr(w, '/');
     const char* plus = strchr(w, '+');
     const char* minutes = w;
@@ -1199,10 +1436,41 @@ static void setting_tc(Color human, bool autoplay, TimeControl tc[2]) {
     if (!con_tc_start) {
         tc[WHITE] = con_tc[WHITE];
         tc[BLACK] = con_tc[BLACK];
+
+        const Color eng = human == WHITE ? BLACK : WHITE;
+        if (!autoplay && tc[eng].kind == TC_CLOCK && tc[eng].none && !tc[human].none) {
+            const TimeControl t = tc[WHITE];
+            tc[WHITE] = tc[BLACK];
+            tc[BLACK] = t;
+        }
         return;
     }
     tc[human == WHITE ? BLACK : WHITE] = TC_START_ENGINE;
     tc[human] = autoplay ? TC_START_ENGINE : TC_NO_LIMIT;
+}
+
+static bool tc_refuse_engine(const TimeControl tc[2], Color human, bool autoplay, const char* cmd, bool setting) {
+    bool bad = false;
+    for (int c = WHITE; c <= BLACK; c++)
+        if ((autoplay || c != (int)human) && tc[c].kind == TC_CLOCK && tc[c].none) bad = true;
+    if (!bad) return false;
+    char text[640];
+    if (autoplay)
+        snprintf(text, sizeof(text), "Not accepted: in autoplay Chessenger plays both sides and needs a finite time for "
+                 "each%s. It plans every move by its clock, and 'infinite' gives it none. Nothing changed. Give a time, "
+                 "for example: 'autoplay 1+1' (1 min + 1 s a move), 'autoplay 60' (1 hour), 'autoplay 120+1' (2 hours + "
+                 "1 s a move).", setting ? " (the 'time' setting gives a side no limit)" : "");
+    else {
+        const char* pre = strcmp(cmd, "play") == 0 ? (human == WHITE ? "play white " : "play black ") : "time ";
+        const bool w = human == WHITE;
+        snprintf(text, sizeof(text), "Not accepted: Chessenger needs a finite time. It plans every move by its clock, and "
+                 "'infinite' gives it none; no limit is for you only. Nothing changed. For example: '%s%s' (you no limit, "
+                 "Chessenger 1 min + 1 s a move), '%s%s' (Chessenger 1 hour), '%s%s' (Chessenger 2 hours + 1 s a move).",
+                 pre, w ? "infinite 1+1" : "1+1 infinite", pre, w ? "infinite 60" : "60 infinite", pre,
+                 w ? "infinite 120+1" : "120+1 infinite");
+    }
+    print_wrapped(text, 2, NULL);
+    return true;
 }
 
 static bool tc_limited(Color c) {
@@ -1284,28 +1552,30 @@ static const char* const GLYPH_BLACK[6] = {
 #define U_BL    "\xe2\x94\x94"
 #define U_BR    "\xe2\x94\x98"
 
-static const char* const BIG_PIECE[2][6][8] = {
+static const char* const BIG_PIECE[3][6][8] = {
     {
-        { "............", ".....##.....", "....####....", ".....##.....", "....####....", "...######..." },
-        { "............", "..##.##.##..", "..########..", "...######...", "...######...", "..########.." },
-        { "....#.#.....", "...######...", ".#######.#..", "....######..", "....######..", "..########.." },
-        { ".....##.....", "....#.###...", "....##.##...", ".....##.....", "....####....", "..########.." },
-        { "#...#..#...#", "##.##..##.##", ".##########.", "..########..", "...######...", "..########.." },
-        { ".....##.....", "...######...", ".....##.....", ".##########.", "...######...", "..########.." },
+        { "..........", "..........", "....##....", "....##....", "...####...", ".........." },
+        { "..........", "..#.##.#..", "..######..", "...####...", "..######..", ".........." },
+        { "..........", "....###...", "..#####...", ".....##...", "...####...", ".........." },
+        { "..........", "....##....", "...#.##...", "....##....", "...####...", ".........." },
+        { "..........", "..#.##.#..", "...####...", "....##....", "...####...", ".........." },
+        { "..........", "....##....", "..######..", "....##....", "...####...", ".........." },
     },
     {
-        { "................", "................", ".......##.......", "......####......",
-          ".......##.......", "......####......", ".....######.....", "....########...." },
-        { "................", "...##.##.##.##..", "...##########...", "....########....",
-          "....########....", "....########....", "...##########...", "..############.." },
-        { "......#.#.......", ".....######.....", "...#########....", ".####.#######...",
-          ".###...######...", "......#######...", ".....########...", "...###########.." },
-        { ".......##.......", "......####......", ".....##.###.....", ".....###.##.....",
-          "......####......", ".......##.......", "......####......", "...##########..." },
-        { "..#...#..#...#..", "..##..##.##..##.", "..###.######.##.", "...##########...",
-          "....########....", ".....######.....", "....########....", "..############.." },
-        { ".......##.......", ".....######.....", ".......##.......", "..############..",
-          "...##########...", "....########....", "....########....", "..############.." },
+        { "............", "............", ".....##.....", "....####....", "...######...", "............" },
+        { "............", "..##.##.##..", "...######...", "...######...", "..########..", "............" },
+        { "............", "....#####...", "..###.####..", "......###...", "...######...", "............" },
+        { "............", ".....##.....", "....##.#....", ".....##.....", "...######...", "............" },
+        { "............", "..#.#..#.#..", "...######...", "....####....", "...######...", "............" },
+        { "............", ".....##.....", "....####....", ".....##.....", "..########..", "............" },
+    },
+    {
+        { "................", ".......##.......", "......####......", ".......##.......", "......####......", ".....######.....", "....########....", "................" },
+        { "................", "...##..##..##...", "...##########...", "....########....", "....########....", "...##########...", "..############..", "................" },
+        { "................", "......#.#.......", ".....#######....", "...###.######...", "..###..######...", "......#######...", "...##########...", "................" },
+        { "................", ".......##.......", "......##.#......", "......####......", ".......##.......", "......####......", "...##########...", "................" },
+        { "................", "..#...#..#...#..", "..##..####..##..", "...##########...", "....########....", ".....######.....", "...##########...", "................" },
+        { "................", ".......##.......", "......####......", ".......##.......", "..############..", "....########....", "...##########...", "................" },
     },
 };
 
@@ -1323,9 +1593,9 @@ static int big_pixel(const char* const* bm, int w, int h, int x, int y, bool out
     return inside ? 0 : 1;
 }
 
-static void big_piece_line(int size, int t, int r, bool outline) {
-    const char* const* bm = BIG_PIECE[size - 3][t];
-    const int w = 4 * size, h = 2 * size, y = 2 * r;
+static void big_piece_line(int size, int t, int r, int cols, int lines, bool outline) {
+    const char* const* bm = BIG_PIECE[size - 2][t];
+    const int w = 2 * cols, h = 2 * lines, y = 2 * r;
     for (int x = 0; x < w; x += 2) {
         const int bits = big_pixel(bm, w, h, x, y, outline) | (big_pixel(bm, w, h, x + 1, y, outline) << 1) |
                          (big_pixel(bm, w, h, x, y + 1, outline) << 2) |
@@ -1341,8 +1611,28 @@ static const char* const SHAPE_GLYPH[6] = {
 static const int SHAPE_SQ_W[5] = { 0, 3, 5, 6, 8 };
 static const int SHAPE_SQ_H[5] = { 0, 1, 3, 3, 4 };
 
+static const int LETTER_SQ_W[5] = { 0, 3, 5, 7, 9 };
+static const int LETTER_SQ_H[5] = { 0, 1, 3, 3, 5 };
+
+static bool checkered_board(void) {
+    return color_depth() > 0 && (con_theme == TH_DARK || con_theme == TH_LIGHT);
+}
+
 static bool shapes_board(void) {
-    return shapes_on() && unicode_pieces() && color_depth() > 0 && (con_theme == TH_DARK || con_theme == TH_LIGHT);
+    return shapes_on() && unicode_pieces() && checkered_board();
+}
+
+static void square_size(int size, int* w, int* h) {
+    if (!checkered_board()) {
+        *w = 2 * size;
+        *h = size;
+    } else if (unicode_pieces() && con_pieces != PC_LETTERS) {
+        *w = SHAPE_SQ_W[size];
+        *h = SHAPE_SQ_H[size];
+    } else {
+        *w = LETTER_SQ_W[size];
+        *h = LETTER_SQ_H[size];
+    }
 }
 
 static const char* const SHAPE_MASK[2][6][8] = {
@@ -1367,6 +1657,24 @@ static const char* const SHAPE_MASK[2][6][8] = {
 static const char* const SHAPE_S2_MASK[6][4] = {
     { ".#.", ".#.", "###", "###" }, { "#.#", "###", "###", "###" }, { ".##", "###", "..#", "###" },
     { ".#.", "#.#", "###", ".#." }, { "#.#", ".#.", ".#.", "###" }, { ".#.", "###", ".#.", "###" },
+};
+
+static const char* const LETTER_S2_MASK[6][4] = {
+    { "##.", "#.#", "##.", "#.." }, { "##.", "#.#", "##.", "#.#" }, { "#.#", "###", "###", "#.#" },
+    { "##.", "##.", "#.#", "##." }, { ".#.", "#.#", "#.#", ".##" }, { "#.#", "##.", "##.", "#.#" },
+};
+static const char* const LETTER_S3_MASK[6][4] = {
+    { "####.", "#...#", "####.", "#...." }, { "####.", "#...#", "####.", "#...#" },
+    { "#...#", "##..#", "#.#.#", "#..##" }, { "####.", "####.", "#...#", "####." },
+    { ".###.", "#...#", "#..#.", ".##.#" }, { "#..#.", "###..", "#..#.", "#...#" },
+};
+static const char* const LETTER_S4_MASK[6][8] = {
+    { "######.", "##...##", "##...##", "######.", "##.....", "##.....", "##.....", "##....." },
+    { "######.", "##...##", "##...##", "######.", "##.##..", "##..##.", "##...##", "##...##" },
+    { "##...##", "##...##", "###..##", "####.##", "##.####", "##..###", "##...##", "##...##" },
+    { "######.", "##...##", "##...##", "######.", "##...##", "##...##", "##...##", "######." },
+    { ".#####.", "##...##", "##...##", "##...##", "##...##", "##.#.##", ".#####.", "....###" },
+    { "##...##", "##..##.", "##.##..", "####...", "####...", "##.##..", "##..##.", "##...##" },
 };
 
 typedef struct {
@@ -1410,6 +1718,27 @@ static void shape_mask_line(const char* const* bm, int w, int h, int ox, int oy,
     for (int x = 0; x < cols; x++) {
         const int up = big_pixel(bm, w, h, x - ox, 2 * r - oy, false), lo = big_pixel(bm, w, h, x - ox, 2 * r + 1 - oy, false);
         shape_pixels(&pen, sq, up ? p16 : q16, up ? p256 : q256, lo ? p16 : q16, lo ? p256 : q256);
+    }
+}
+
+static void big_piece_square_line(int size, int t, int r, int cols, int lines, bool outline, const Style* sq) {
+    if (!apple_terminal()) {
+        big_piece_line(size, t, r, cols, lines, outline);
+        return;
+    }
+    const char* const* bm = BIG_PIECE[size - 2][t];
+    const int w = 2 * cols, h = 2 * lines, y = 2 * r;
+    const short p16 = sq->fg16, p256 = sq->fg256, q16 = (short)(sq->bg16 - 10), q256 = sq->bg256;
+    ShapePen pen = { -2, -2, -2, -2 };
+    for (int x = 0; x < w; x += 2) {
+        const int bits = big_pixel(bm, w, h, x, y, outline) | (big_pixel(bm, w, h, x + 1, y, outline) << 1) |
+                         (big_pixel(bm, w, h, x, y + 1, outline) << 2) |
+                         (big_pixel(bm, w, h, x + 1, y + 1, outline) << 3);
+        const int up = bits & 3, lo = bits >> 2;
+        const bool piece_bg = up == 3 || (up == 0 ? false : lo == 3);
+        const int glyph = piece_bg ? (~bits & 15) : bits;
+        if (piece_bg) shape_put(&pen, sq, q16, q256, p16, p256, QUADRANT[glyph]);
+        else shape_put(&pen, sq, p16, p256, q16, q256, QUADRANT[glyph]);
     }
 }
 
@@ -1459,9 +1788,9 @@ static int board_rows(void) {
 static int board_size_default(void) {
     const int cols = board_columns(), rows = board_rows();
     if (rows == 0) return 3;
-    const bool shp = shapes_board();
     for (int n = 3; n >= 2; n--) {
-        const int sq_width = shp ? SHAPE_SQ_W[n] : 2 * n, sq_h = shp ? SHAPE_SQ_H[n] : n;
+        int sq_width, sq_h;
+        square_size(n, &sq_width, &sq_h);
         const int board_width = 8 + 8 * sq_width + 1, under = board_width + 2 + 35 <= cols ? 0 : 8;
         if (board_width <= cols && rows >= 8 * sq_h + 5 + under) return n;
     }
@@ -1474,9 +1803,13 @@ static int board_size_now(void) {
     if (!isatty(STDOUT_FILENO)) return 1;
     if (!unicode_pieces()) return 2;
     const int cols = board_columns(), rows = board_rows();
-    if (shapes_board()) {
-        for (int n = 4; n >= 2; n--)
-            if (rows >= 8 * SHAPE_SQ_H[n] + 8 && cols >= 8 + 8 * SHAPE_SQ_W[n] + 1 + 2 + 35) return n;
+    if (checkered_board()) {
+
+        for (int n = 4; n >= 2; n--) {
+            int sq_width, sq_h;
+            square_size(n, &sq_width, &sq_h);
+            if (rows >= 8 * sq_h + 8 && cols >= 8 + 8 * sq_width + 1 + 2 + 35) return n;
+        }
         return 1;
     }
     for (int n = 4; n >= 3; n--)
@@ -1592,10 +1925,11 @@ static void print_board(Position* pos) {
 
     const bool shp = uni && checkered && shapes_on();
     const bool shp_letters = uni && !checkered && shapes_on();
-    const int sq_width = shp ? SHAPE_SQ_W[size] : 2 * size, sq_h = shp ? SHAPE_SQ_H[size] : size;
+    int sq_width, sq_h;
+    square_size(size, &sq_width, &sq_h);
 
-    const bool big = uni && !shp_letters && size >= (shp ? 2 : 3);
-    const int inner = 8 * sq_width + (!shp && (size == 1 || !checkered) ? 1 : 0);
+    const bool big = uni && !shp_letters && size >= (checkered ? 2 : 3);
+    const int inner = 8 * sq_width + (checkered ? 0 : 1);
     const bool panel_right = size == 1 || board_panel_fits(panel, (uni ? 6 : 4) + 1 + inner + 1);
     board_frame(uni, true, inner);
     for (int line = 0; line < 8 * sq_h; line++) {
@@ -1631,6 +1965,9 @@ static void print_board(Position* pos) {
             const bool lit = sq == hl_from || sq == hl_to;
             if (checkered) {
                 Style sq_style = hl;
+
+                const bool lit_side = lit && role != R_EMPTY && (shp || con_theme == TH_LIGHT);
+                const bool lit_outline = lit && c == WHITE && !lit_side;
                 if (!lit) {
                     const bool light = ((rank + file) & 1) != 0;
                     const BoardPalette* bp = &BOARD_PALETTE[con_theme];
@@ -1638,20 +1975,29 @@ static void print_board(Position* pos) {
                     sq_style.bg256 = light ? bp->light256 : bp->dark256;
                     sq_style.fg16 = c == WHITE ? bp->white16 : bp->black16;
                     sq_style.fg256 = c == WHITE ? bp->white256 : bp->black256;
-                } else if (shp && role != R_EMPTY) {
+                } else if (lit_side) {
                     sq_style.fg16 = c == WHITE ? BOARD_PALETTE[con_theme].white16 : BOARD_PALETTE[con_theme].black16;
                     sq_style.fg256 = c == WHITE ? BOARD_PALETTE[con_theme].white256 : BOARD_PALETTE[con_theme].black256;
                 }
                 if (role == R_EMPTY) glyph = " ";
-                else if (shp) glyph = SHAPE_GLYPH[t];
-                else if (uni && !(lit && c == WHITE)) glyph = GLYPH_BLACK[t];
+                else if (shp && con_pieces == PC_LETTERS) {
+                    static char big1[2];
+                    big1[0] = "PRNBQK"[t];
+                    big1[1] = '\0';
+                    glyph = big1;
+                } else if (shp) glyph = SHAPE_GLYPH[t];
+                else if (uni && !lit_outline) glyph = GLYPH_BLACK[t];
                 style_on(role, &sq_style);
                 if (big && role != R_EMPTY) {
-                    if (shp && size == 2)
+                    if (shp && con_pieces == PC_LETTERS) {
+                        if (size == 2) shape_mask_line(LETTER_S2_MASK[t], 3, 4, 1, 1, sq_width, line % sq_h, &sq_style);
+                        else if (size == 3) shape_mask_line(LETTER_S3_MASK[t], 5, 4, 1, 1, sq_width, line % sq_h, &sq_style);
+                        else shape_mask_line(LETTER_S4_MASK[t], 7, 8, 1, 1, sq_width, line % sq_h, &sq_style);
+                    } else if (shp && size == 2)
                         shape_mask_line(SHAPE_S2_MASK[t], 3, 4, 1, 1, 5, line % sq_h, &sq_style);
                     else if (shp)
                         shape_mask_line(SHAPE_MASK[size - 3][t], 2 * size, 2 * size, 0, 0, 2 * size, line % sq_h, &sq_style);
-                    else big_piece_line(size, t, line % sq_h, lit && c == WHITE);
+                    else big_piece_square_line(size, t, line % sq_h, sq_width, sq_h, lit_outline, &sq_style);
                     style_off();
                     continue;
                 }
@@ -1665,7 +2011,7 @@ static void print_board(Position* pos) {
             if (size > 1) {
                 if (big && role != R_EMPTY) {
                     style_on(role, lit ? &hl : NULL);
-                    big_piece_line(size, t, line % sq_h, c == WHITE);
+                    big_piece_line(size, t, line % sq_h, sq_width, sq_h, c == WHITE);
                     style_off();
                     continue;
                 }
@@ -1687,7 +2033,7 @@ static void print_board(Position* pos) {
             style_off();
             fputc(' ', stdout);
         }
-        if (!shp && (checkered ? size == 1 : size > 1)) fputc(' ', stdout);
+        if (!checkered && size > 1) fputc(' ', stdout);
         put_styled(R_FRAME, uni ? U_V : "|");
         if (mid && panel_right && panel[row][0]) {
             fputs("  ", stdout);
@@ -1735,7 +2081,18 @@ static const ConsoleCommand* find_command_or_alias(const char* word, const char*
 }
 
 static void help_line(const ConsoleCommand* c) {
-    printf("  %-22s %s\n", c->usage, c->text);
+
+    char buf[256];
+    if (strlen(c->usage) > 22) {
+        printf("  ");
+        put_role(R_COMMAND, c->usage);
+        printf("\n");
+        snprintf(buf, sizeof(buf), "  %-22s %s", "", c->text);
+        print_wrapped(buf, 25, NULL);
+    } else {
+        snprintf(buf, sizeof(buf), "  %-22s %s", c->usage, c->text);
+        print_wrapped_head(buf, 25, NULL, R_COMMAND, 2, (int)strlen(c->usage));
+    }
 }
 
 static void help_overview(void) {
@@ -1743,6 +2100,7 @@ static void help_overview(void) {
     printf("Chessenger %s console: games against Chessenger, analysis, annotated PGN.\n", ENGINE_VERSION);
     printf("Play a game: play white 2+1 (you take White; 2 minutes, plus 1 second a move).\n");
     printf("Details: help <command> or help <group>, for example: help play, help game.\n\n");
+    bool printed = false;
     for (int g = 0; g < G_COUNT; g++) {
         bool any = false;
         Wrap w;
@@ -1750,24 +2108,53 @@ static void help_overview(void) {
             const ConsoleCommand* c = &COMMANDS[i];
             if (c->group != g || !c->available || !c->in_grid) continue;
             if (!any) {
-                char head[16];
-                snprintf(head, sizeof(head), " %-10s", CON_GROUP_NAME[g]);
-                wrap_start(&w, head, 11, 2, false);
+
+                const int glen = (int)strlen(CON_GROUP_NAME[g]);
+                if (printed) fputc('\n', stdout);
+                fputc(' ', stdout);
+                put_role(R_COMMAND, CON_GROUP_NAME[g]);
+                printf("%*s", glen < 10 ? 10 - glen : 0, "");
+                wrap_start(&w, "", 11, 2, false);
+                w.col = 1 + (glen < 10 ? 10 : glen);
+                w.role = R_COMMAND;
                 any = true;
             }
             wrap_word(&w, c->name);
         }
-        if (any) wrap_end(&w);
+        if (any) { wrap_end(&w); printed = true; }
     }
 
-    printf("\nMoves: standard algebraic notation (Nf3, exd5, O-O, e8=Q)\n");
-    printf("or coordinates (g1f3, e7e8q).\n");
+    printf("\nMoves: Nf3, exd5, O-O, e8=Q (standard algebraic notation) or g1f3, e7e8q.\n");
+
+    printf("\nSimple sentences work too: show board, who is winning, take back (help help).\n");
 }
 
 static void help_more(const char* lead, const char* text) {
-    char buf[640];
-    snprintf(buf, sizeof(buf), "  %s%s", lead, text);
+
+    const size_t n = strlen(lead) + strlen(text) + 3;
+    char* buf = malloc(n);
+    if (!buf) { printf("  %s%s\n", lead, text); return; }
+    snprintf(buf, n, "  %s%s", lead, text);
     print_wrapped(buf, 4, NULL);
+    free(buf);
+}
+
+static void help_more_lines(const char* text) {
+    const size_t n = strlen(text) + 3;
+    char* buf = malloc(n);
+    if (!buf) { help_more("", text); return; }
+    for (const char* s = text;;) {
+        const char* e = strchr(s, '\n');
+        const int len = e ? (int)(e - s) : (int)strlen(s);
+        int lead = 0;
+        while (lead < len && s[lead] == ' ') lead++;
+        if (lead == 0) fputc('\n', stdout);
+        snprintf(buf, n, "  %.*s", len, s);
+        print_wrapped(buf, 4 + lead, NULL);
+        if (!e) break;
+        s = e + 1;
+    }
+    free(buf);
 }
 
 static const struct { const char* word; const char* usage; const char* text; const char* example; } UCI_WORD_HELP[] = {
@@ -1779,15 +2166,33 @@ static const struct { const char* word; const char* usage; const char* text; con
 
 static const char* strength_note(void);
 
-static bool help_uci_word(const char* topic) {
+static bool help_uci_word(const char* topic, bool after_group) {
     for (size_t i = 0; i < sizeof(UCI_WORD_HELP) / sizeof(UCI_WORD_HELP[0]); i++) {
         if (strcasecmp(UCI_WORD_HELP[i].word, topic) != 0) continue;
-        printf("  %-22s %s\n", UCI_WORD_HELP[i].usage, UCI_WORD_HELP[i].text);
+        if (after_group) fputc('\n', stdout);
+        const int ulen = (int)strlen(UCI_WORD_HELP[i].usage);
+        printf("  ");
+        put_role(R_COMMAND, UCI_WORD_HELP[i].usage);
+        if (ulen > 22)
+            printf("\n  %-22s %s\n\n", "", UCI_WORD_HELP[i].text);
+        else
+            printf("%*s %s\n\n", 22 - ulen, "", UCI_WORD_HELP[i].text);
         help_more("Example: ", UCI_WORD_HELP[i].example);
-        help_more("", "A UCI command: it works in the console as in UCI mode.");
+        help_more_lines("A UCI command: it works in the console as in UCI mode.");
         return true;
     }
     return false;
+}
+
+static bool help_gap_after(CommandId id) {
+    switch (id) {
+        case C_SWITCH: case C_TIME: case C_SAVE:
+        case C_GO: case C_LINES:
+        case C_STRENGTH: case C_PONDER:
+            return true;
+        default:
+            return false;
+    }
 }
 
 static void help_topic(const char* topic) {
@@ -1797,14 +2202,15 @@ static void help_topic(const char* topic) {
     if (c) {
 
         help_line(c);
+        fputc('\n', stdout);
         help_more("Example: ", c->example);
-        if (!c->available) printf("  Not available in this version yet.\n");
-        else if (c->more) help_more("", c->more);
+        if (!c->available) printf("\n  Not available in this version yet.\n");
+        else if (c->more) help_more_lines(c->more);
         if (c->available && (c->id == C_SKILL || c->id == C_ELO || c->id == C_STRENGTH) && strength_note()[0]) {
             char note[96];
             snprintf(note, sizeof(note), "%s.", strength_note());
             note[0] = (char)toupper((unsigned char)note[0]);
-            help_more("", note);
+            help_more_lines(note);
         }
         return;
     }
@@ -1819,12 +2225,13 @@ static void help_topic(const char* topic) {
             help_line(k);
             last_usage = k->usage;
             shown++;
+            if (help_gap_after(k->id)) fputc('\n', stdout);
         }
         if (shown == 0) printf("No commands of the group '%s' are available in this version yet.\n", CON_GROUP_NAME[g]);
-        help_uci_word(topic);
+        help_uci_word(topic, true);
         return;
     }
-    if (help_uci_word(topic)) return;
+    if (help_uci_word(topic, false)) return;
     char first[160], e[64];
     snprintf(first, sizeof(first), "No help for '%s'.", echo_word(topic, e, sizeof(e)));
     print_two_part(first, "Type 'help' for a list of commands.");
@@ -1847,7 +2254,7 @@ void console_uci_help(void) {
         bool available = c ? c->available : strcmp(UCI_HELP[i].word, "console") == 0;
         if (available) printf("  %-10s %s\n", UCI_HELP[i].word, UCI_HELP[i].text);
     }
-    printf("From the command line: chessenger console");
+    printf("\nFrom the command line: chessenger console");
     if (find_command("play")->available) printf(" | play");
     if (find_command("analyze")->available) printf(" | analyze");
     printf(" | --help\n");
@@ -2089,13 +2496,166 @@ static bool extra_text(const char* rest, const char* cmd, const char* usage) {
 static bool takes_no_argument(CommandId id) {
     switch (id) {
         case C_NEW: case C_SWITCH: case C_RESIGN: case C_CLOCK: case C_HISTORY: case C_FEN:
-        case C_MOVES: case C_FLIP: case C_FIRST: case C_LAST: case C_ANALYZE: case C_STOP: case C_EVAL:
+        case C_MOVES: case C_FLIP: case C_FIRST: case C_LAST: case C_STOP:
         case C_NETWORK: case C_OPTIONS: case C_ABOUT: case C_VERSION: case C_LICENSE: case C_UCI: case C_XBOARD:
         case C_QUIT: case C_PAUSE:
+        case C_END:
             return true;
         default:
             return false;
     }
+}
+
+#define SENT_WORDS 24
+typedef struct { int n; char w[SENT_WORDS][24]; } Sentence;
+
+static void sentence_read(const char* line, Sentence* s) {
+    s->n = 0;
+    size_t len = 0;
+    for (const char* p = line;; p++) {
+        const unsigned char ch = (unsigned char)*p;
+        if (ch == '\'') continue;
+        if (isalnum(ch)) {
+            if (len + 1 < sizeof(s->w[0]) && s->n < SENT_WORDS) s->w[s->n][len++] = (char)tolower(ch);
+            continue;
+        }
+        if (len > 0 && s->n < SENT_WORDS) {
+            s->w[s->n][len] = '\0';
+            s->n++;
+        }
+        len = 0;
+        if (!ch) break;
+    }
+}
+
+static bool sent_has(const Sentence* s, const char* w) {
+    for (int i = 0; i < s->n; i++)
+        if (strcmp(s->w[i], w) == 0) return true;
+    return false;
+}
+
+static const char* sentence_rule(const Sentence* s) {
+#define H(x) sent_has(s, x)
+    if (s->n == 0) return NULL;
+    if (H("hint") || H("suggest") || H("suggestion") || (H("best") && (H("move") || H("play"))) ||
+        ((H("what") || H("which") || H("should")) && (H("play") || H("move")) && !H("moves") && !H("legal")))
+        return "hint";
+    if ((H("take") && H("back")) || H("takeback") || H("undo") || (H("go") && H("back"))) return "undo";
+    if ((H("new") || H("another") || H("start")) && H("game")) return "new";
+    if (H("save") && (H("game") || H("pgn"))) return "save";
+    if (H("flip") || ((H("turn") || H("rotate")) && H("board"))) return "flip";
+    if (H("board") || ((H("show") || H("see")) && H("position"))) return "board";
+    if (H("clock") || ((H("time") || H("minutes")) &&
+                       (H("left") || H("how") || H("much") || H("many") || H("have") || H("my") || H("remaining"))))
+        return "clock";
+    if (H("better") || H("winning") || H("evaluation") || H("evaluate") || H("advantage") || H("score") ||
+        (H("who") && (H("wins") || H("win") || H("leads"))) || (H("how") && H("position") && (H("is") || H("stand"))))
+        return "eval";
+    if (H("history") || (H("moves") && (H("played") || H("so")))) return "history";
+    if (H("moves") && (H("legal") || H("possible") || H("list") || H("which") || H("what") || H("can"))) return "moves";
+    if ((H("mate") || H("checkmate")) && (H("find") || H("is") || H("there") || H("look") || H("any"))) return "mate";
+    if (H("fen")) return "fen";
+    if (H("help") || H("commands") || H("command") || (H("how") && (H("do") || H("can")) && H("i")) ||
+        (H("what") && H("can") && (H("i") || H("you"))))
+        return "help";
+#undef H
+    return NULL;
+}
+
+static bool sentence_filler(const Sentence* s, int from) {
+    static const char* const FILL[] = { "the", "a", "my", "this", "game", "please", "now", "current", "position",
+                                        "last", "move", "for", "me", "us", "again", "pls", "it", "board",
+                                        "around" };
+    if (from >= s->n) return false;
+    for (int i = from; i < s->n; i++) {
+        bool f = false;
+        for (size_t k = 0; k < sizeof(FILL) / sizeof(FILL[0]) && !f; k++) f = strcmp(s->w[i], FILL[k]) == 0;
+        if (!f) return false;
+    }
+    return true;
+}
+
+static const char* sentence_typo(const char* word) {
+    static const char* const SAFE[] = { "help", "board", "hint", "eval", "clock", "history", "moves", "options",
+                                        "network", "about", "version" };
+    if (strlen(word) < 4) return NULL;
+    const char* best = NULL;
+    int best_d = 2, ties = 0;
+    for (size_t k = 0; k < sizeof(SAFE) / sizeof(SAFE[0]); k++) {
+        const int d = edit_distance(word, SAFE[k]);
+        if (d < best_d) { best_d = d; best = SAFE[k]; ties = 0; }
+        else if (d == best_d) ties++;
+    }
+    return ties == 0 ? best : NULL;
+}
+
+static void sentence_note(const char* line, const char* as) {
+#ifndef __wasi__
+    const char* home = getenv("HOME");
+#ifdef _WIN32
+    if (!home || !home[0]) home = getenv("USERPROFILE");
+#endif
+    if (!home || !home[0] || env_set("CHESSENGER_NO_NOTES")) return;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/.chessenger-sentences.txt", home);
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+    if (as) fprintf(f, "understood\t%s\t%s\n", line, as);
+    else fprintf(f, "not understood\t%s\n", line);
+    fclose(f);
+#else
+    (void)line;
+    (void)as;
+#endif
+}
+
+static int pasted_fen_slashes(const char* w) {
+    int k = 0;
+    for (; *w && *w != ' ' && *w != '\t'; w++) k += *w == '/';
+    return k;
+}
+
+static bool sentence_understand(const char* line, const char* word, const ConsoleCommand* c, char* out, size_t n) {
+    Sentence s;
+    sentence_read(line, &s);
+    const char* as = NULL;
+    if (c) {
+        if (s.n < 2 || !c->available) return false;
+        switch (c->id) {
+            case C_NEW: case C_SAVE: case C_BOARD: case C_HINT: case C_EVAL: case C_CLOCK: case C_HISTORY: case C_FEN:
+            case C_MOVES: case C_FLIP: case C_UNDO: case C_MATE:
+                if (sentence_filler(&s, 1)) as = c->name;
+                break;
+            case C_TIME:
+                if (sentence_rule(&s) && strcmp(sentence_rule(&s), "clock") == 0) as = "clock";
+                break;
+            default: break;
+        }
+        if (!as) return false;
+        snprintf(out, n, "%s", as);
+    } else if (pasted_fen_slashes(line) == 7) {
+        Position tmp;
+        if (!parse_fen(&tmp, line)) return false;
+        snprintf(out, n, "setboard %s", line);
+        as = "setboard";
+    } else if (looks_like_move(word)) {
+        return false;
+    } else {
+        Sentence one;
+        sentence_read(word, &one);
+        as = s.n == 1 && one.n == 1 ? sentence_typo(word) : NULL;
+        if (!as) as = sentence_rule(&s);
+        if (!as) {
+            sentence_note(line, NULL);
+            return false;
+        }
+        snprintf(out, n, "%s", as);
+    }
+    sentence_note(line, out);
+    char t[MAX_UCI_LINE + 32];
+    snprintf(t, sizeof(t), "Understood as: %s", out);
+    print_wrapped(t, 2, NULL);
+    return true;
 }
 
 void console_uci_unknown(const char* line) {
@@ -2159,6 +2719,8 @@ static void cmd_history(Position* pos) {
         }
         wrap_word(&w, token);
     }
+
+    if ((game_on && game_over) || (!game_on && game_viewed && redo_count == 0)) wrap_word(&w, game_result);
     wrap_end(&w);
 }
 
@@ -2254,7 +2816,7 @@ static void cmd_typed_moves(Position* pos, const char* line) {
     if (played) record_clear();
 }
 
-static void cmd_color(const char* arg) {
+static void cmd_color(Position* pos, const char* arg) {
     char w[16];
     const char* rest = split_word(arg, w, sizeof(w), true);
     if (w[0]) {
@@ -2282,7 +2844,10 @@ static void cmd_color(const char* arg) {
         printf("Colors: auto (%s: %s), theme %s\n", color_auto_reason(), depth_text, THEME_NAME[con_theme]);
     else
         printf("Colors: %s (%s), theme %s\n", MODE[con_color], depth_text, THEME_NAME[con_theme]);
-    if (w[0]) return;
+    if (w[0]) {
+        print_board(pos);
+        return;
+    }
 
     static const struct { int cp, mate; } SAMPLE[] = {
         { 0, -3 }, { -320, 0 }, { -200, 0 }, { -100, 0 }, { -40, 0 }, { 0, 0 },
@@ -2316,24 +2881,27 @@ static void cmd_theme(Position* pos, const char* arg) {
     printf("Unknown theme: '%s'. Themes: dark, light, mono, retro.\n", w);
 }
 
-static void cmd_pieces(const char* arg) {
+static void cmd_pieces(Position* pos, const char* arg) {
     char w[16];
     const char* rest = split_word(arg, w, sizeof(w), true);
     PieceMode m = con_pieces;
     if (strcmp(w, "shapes") == 0) m = PC_SHAPES;
+    else if (strcmp(w, "letters") == 0) m = PC_LETTERS;
     else if (strcmp(w, "unicode") == 0) m = PC_UNICODE;
     else if (strcmp(w, "ascii") == 0) m = PC_ASCII;
     else if (strcmp(w, "auto") == 0) m = PC_AUTO;
     else if (w[0]) {
-        printf("Unknown piece setting: '%s'. Use shapes, unicode, ascii or auto.\n", w);
+        printf("Unknown piece setting: '%s'. Use shapes, letters, unicode, ascii or auto.\n", w);
         return;
     }
-    if (extra_text(rest, "pieces", "pieces shapes|unicode|ascii|auto")) return;
+    if (extra_text(rest, "pieces", "pieces shapes|letters|unicode|ascii|auto")) return;
     con_pieces = m;
-    static const char* const NAME[] = { "auto", "unicode", "ascii", "shapes" };
+    static const char* const NAME[] = { "auto", "unicode", "ascii", "shapes", "letters" };
 
-    const char* now = shapes_board() ? "shapes" : unicode_pieces() && !shapes_on() ? "Unicode" : "ASCII";
+    const char* now = shapes_board() ? (con_pieces == PC_LETTERS ? "letters" : "shapes") : unicode_pieces() && !shapes_on() ? "Unicode" : "ASCII";
     printf("Pieces: %s (%s now)\n", NAME[con_pieces], now);
+
+    if (w[0]) print_board(pos);
 }
 
 static void cmd_pov(const char* arg) {
@@ -2571,7 +3139,10 @@ static ConsoleAction cmd_setboard(Position* pos, const char* arg, char* line, si
         } else if ((tmp.pieces[WHITE][PAWN] | tmp.pieces[BLACK][PAWN]) & 0xFF000000000000FFULL) {
             why = "a pawn on the first or last rank";
         } else if (is_in_check(&tmp, tmp.to_move == WHITE ? BLACK : WHITE)) {
-            why = "the side not to move is in check";
+
+            snprintf(extra, sizeof(extra), "%s is in check, but it is %s's move: impossible",
+                     tmp.to_move == WHITE ? "Black" : "White", tmp.to_move == WHITE ? "White" : "Black");
+            why = extra;
         }
     }
     if (why) {
@@ -2610,6 +3181,12 @@ static void say_game_over(void) {
     else printf("The game is over. Type 'new' to play again or 'undo' to take back.\n");
 }
 
+static bool eng_paused_says(void) {
+    if (!(game_on && !game_over && eng_paused)) return false;
+    printf("Chessenger's move is paused: type 'pause' to let it think first.\n");
+    return true;
+}
+
 static ConsoleAction cmd_undo(Position* pos, const char* arg, char* line, size_t size) {
     history_check(pos);
     char w[16];
@@ -2622,6 +3199,7 @@ static ConsoleAction cmd_undo(Position* pos, const char* arg, char* line, size_t
         return CONSOLE_DONE;
     }
     if (extra_text(rest, "undo", "undo [N]")) return CONSOLE_DONE;
+    if (eng_paused_says()) return CONSOLE_DONE;
     if (game_on && game_auto) {
         if (!game_over) {
             printf("Not during autoplay: 'stop' ends it.\n");
@@ -2680,6 +3258,7 @@ static ConsoleAction cmd_undo(Position* pos, const char* arg, char* line, size_t
     }
     for (int i = hist_count - 1; i >= keep; i--) redo_push(&hist[i]);
     const bool white = ((keep + (hist_base_black ? 1 : 0)) % 2) == 0;
+    if (game_on) screen_top();
     printf("Took back %d half-move%s. %s to move.\n", taken, taken == 1 ? "" : "s", white ? "White" : "Black");
     if (game_on) {
         if (game_over) {
@@ -2719,6 +3298,8 @@ bool console_takes_search_output(void) {
 #define STRENGTH_ELO_MIN     1200
 #define STRENGTH_ELO_MAX     2800
 #define STRENGTH_ELO_STEP    200
+
+#define STRENGTH_UCI_ELO_MIN STRENGTH_ELO_MIN
 
 static int str_skill = STRENGTH_SKILL_TOP;
 static bool str_limit = false;
@@ -2765,7 +3346,8 @@ static const char* strength_note(void) {
 void console_strength_uci_options(void) {
     printf("option name Skill Level type spin default %d min 1 max %d\n", STRENGTH_SKILL_TOP, STRENGTH_SKILL_TOP);
     printf("option name UCI_LimitStrength type check default false\n");
-    printf("option name UCI_Elo type spin default %d min %d max %d\n", STRENGTH_ELO_MIN, STRENGTH_ELO_MIN, STRENGTH_ELO_MAX);
+    printf("option name UCI_Elo type spin default %d min %d max %d\n", STRENGTH_ELO_MIN, STRENGTH_UCI_ELO_MIN,
+           STRENGTH_ELO_MAX);
 }
 
 bool console_strength_setoption(const char* name, const char* value) {
@@ -2782,7 +3364,7 @@ bool console_strength_setoption(const char* name, const char* value) {
     const bool skill = strcasecmp(name, "Skill Level") == 0;
     if (!skill && strcasecmp(name, "UCI_Elo") != 0) return false;
     const char* nm = skill ? "Skill Level" : "UCI_Elo";
-    const long lo = skill ? 1 : STRENGTH_ELO_MIN, hi = skill ? STRENGTH_SKILL_TOP : STRENGTH_ELO_MAX;
+    const long lo = skill ? 1 : STRENGTH_UCI_ELO_MIN, hi = skill ? STRENGTH_SKILL_TOP : STRENGTH_ELO_MAX;
     if (!value[0]) {
         printf("info string setoption %s: missing value, option ignored\n", nm);
         return true;
@@ -2823,7 +3405,7 @@ const LevelStrength* console_strength_go(bool bench) {
 }
 
 bool console_hint_go(void) {
-    return con_on && search_kind == SK_HINT;
+    return con_on && (search_kind == SK_HINT || search_kind == SK_ANALYZE);
 }
 
 const LevelStrength* console_strength_game(void) {
@@ -2883,7 +3465,7 @@ static void cmd_skill(const char* arg) {
 static void cmd_elo(const char* arg) {
     char w[16], usage[64];
     const char* rest = split_word(arg, w, sizeof(w), true);
-    snprintf(usage, sizeof(usage), "elo N, N = %d-%d, or elo full", STRENGTH_ELO_MIN, STRENGTH_ELO_MAX);
+    snprintf(usage, sizeof(usage), "elo N, N = %d-%d, or elo full", STRENGTH_UCI_ELO_MIN, STRENGTH_ELO_MAX);
     long v = 0;
     if (strcmp(w, "full") == 0 || strcmp(w, "max") == 0) {
         if (extra_text(rest, "elo", usage)) return;
@@ -2891,11 +3473,11 @@ static void cmd_elo(const char* arg) {
         str_limit = false;
     } else if (w[0]) {
         if (!parse_count(w, strlen(w), 0, 999999999L, &v)) {
-            printf("Usage: elo N, N = %d-%d, or elo full ('help elo').\n", STRENGTH_ELO_MIN, STRENGTH_ELO_MAX);
+            printf("Usage: elo N, N = %d-%d, or elo full ('help elo').\n", STRENGTH_UCI_ELO_MIN, STRENGTH_ELO_MAX);
             return;
         }
-        if (v < STRENGTH_ELO_MIN || v > STRENGTH_ELO_MAX) {
-            printf("Elo %ld is out of range (%d-%d). Nothing changed.\n", v, STRENGTH_ELO_MIN, STRENGTH_ELO_MAX);
+        if (v < STRENGTH_UCI_ELO_MIN || v > STRENGTH_ELO_MAX) {
+            printf("Elo %ld is out of range (%d-%d). Nothing changed.\n", v, STRENGTH_UCI_ELO_MIN, STRENGTH_ELO_MAX);
             return;
         }
         if (extra_text(rest, "elo", usage)) return;
@@ -2908,7 +3490,7 @@ static void cmd_elo(const char* arg) {
 static void cmd_strength(const char* arg) {
     char w[16], usage[64];
     const char* rest = split_word(arg, w, sizeof(w), true);
-    snprintf(usage, sizeof(usage), "strength N, N = %d-%d, or strength full", STRENGTH_ELO_MIN, STRENGTH_ELO_MAX);
+    snprintf(usage, sizeof(usage), "strength N, N = %d-%d, or strength full", STRENGTH_UCI_ELO_MIN, STRENGTH_ELO_MAX);
     long v = 0;
     if (strcmp(w, "full") == 0 || strcmp(w, "max") == 0) {
         if (extra_text(rest, "strength", usage)) return;
@@ -2916,12 +3498,12 @@ static void cmd_strength(const char* arg) {
         str_limit = false;
     } else if (w[0]) {
         if (!parse_count(w, strlen(w), 0, 999999999L, &v)) {
-            printf("Usage: strength N, N = %d-%d, or strength full ('help strength').\n", STRENGTH_ELO_MIN,
+            printf("Usage: strength N, N = %d-%d, or strength full ('help strength').\n", STRENGTH_UCI_ELO_MIN,
                    STRENGTH_ELO_MAX);
             return;
         }
-        if (v < STRENGTH_ELO_MIN || v > STRENGTH_ELO_MAX) {
-            printf("Elo %ld is out of range (%d-%d). Nothing changed.\n", v, STRENGTH_ELO_MIN, STRENGTH_ELO_MAX);
+        if (v < STRENGTH_UCI_ELO_MIN || v > STRENGTH_ELO_MAX) {
+            printf("Elo %ld is out of range (%d-%d). Nothing changed.\n", v, STRENGTH_UCI_ELO_MIN, STRENGTH_ELO_MAX);
             return;
         }
         if (extra_text(rest, "strength", usage)) return;
@@ -3028,8 +3610,9 @@ static void post_score(int score, bool mate, int mate_moves, const char* bound, 
     snprintf(buf, size, "%s%s", b, num);
 }
 
+static int post_over = 0;
 static void post_main_line(const char* pv, int line_no) {
-    int room = line_width() - POST_LINE_COL;
+    int room = line_width() - POST_LINE_COL - post_over;
     if (line_no > 0) {
         char num[16];
         snprintf(num, sizeof(num), "%d) ", line_no);
@@ -3068,11 +3651,34 @@ static void post_main_line(const char* pv, int line_no) {
     }
 }
 
+static void post_block_move(int line_no) {
+    if (line_no <= 1) {
+        if (post_block > 0) {
+            fputc('\r', stdout);
+            if (post_block > 1) printf("\033[%dA", post_block - 1);
+            fputs(post_block > 1 ? "\033[2K\033[J" : "\033[2K", stdout);
+        }
+        post_block = 1;
+        return;
+    }
+    if (post_block > 0) fputs("\n\033[2K", stdout);
+    post_block++;
+}
+
+static void post_block_end(void) {
+    if (post_block <= 0) return;
+    fputc('\n', stdout);
+    post_block = 0;
+    fflush(stdout);
+}
+
 static void post_row(int depth, int seldepth, int score, bool mate, int mate_moves, long long time_ms, long long nodes,
                      const char* pv, const char* bound, int line_no) {
     char dep[16], sc[32], tm[24], nd[24], sp[24];
     Role role;
     bound_row_clear();
+    const bool in_place = screen_in_place();
+    if (in_place) post_block_move(line_no);
     snprintf(dep, sizeof(dep), "%3d/%-2d", depth, seldepth);
     post_score(score, mate, mate_moves, bound, sc, sizeof(sc), &role);
     if (time_ms < 100000) snprintf(tm, sizeof(tm), "%.2fs", (double)time_ms / 1000.0);
@@ -3083,6 +3689,8 @@ static void post_row(int depth, int seldepth, int score, bool mate, int mate_mov
     else put_styled(R_FRAME, dep);
 
     const int sclen = (int)strlen(sc);
+
+    post_over = in_place ? ((int)strlen(dep) > 6 ? (int)strlen(dep) - 6 : 0) + (sclen > 8 ? sclen - 8 : 0) : 0;
     printf("%*s", sclen < 8 ? 8 - sclen : 0, "");
     if (bound) {
         printf("%.2s", sc);
@@ -3095,7 +3703,9 @@ static void post_row(int depth, int seldepth, int score, bool mate, int mate_mov
     else snprintf(rest, sizeof(rest), "%8s%9s%9s   ", tm, nd, sp);
     put_styled(R_FRAME, rest);
     post_main_line(pv, line_no);
-    if (bound) {
+    if (in_place) {
+
+    } else if (bound) {
         bound_cols = line_width();
     } else {
         fputc('\n', stdout);
@@ -3120,6 +3730,11 @@ void console_search_info(int multipv, int depth, int seldepth, int score, bool m
         res_mate_moves = mate_moves;
         res_depth = depth;
         snprintf(res_pv, sizeof(res_pv), "%s", pv ? pv : "");
+    } else if (multipv == 2) {
+        res2_info = true;
+        res2_cp = score;
+        res2_mate = mate;
+        res2_mate_moves = mate_moves;
     }
     if (think_on && multipv <= 1) think_show(depth);
     if (!post_rows) return;
@@ -3197,13 +3812,23 @@ static void game_end(const char* result) {
     game_over = true;
     draw_offer = false;
     clock_paused = false;
+    pause_req = eng_paused = false;
     own_count = 0;
 
     snprintf(game_result, sizeof(game_result), "%s", strstr(result, "1/2-1/2") ? "1/2-1/2" :
              strstr(result, "1-0") ? "1-0" : strstr(result, "0-1") ? "0-1" : "*");
-    if (game_auto) print_two_part(result, "Type 'save' to keep the game, 'history' or 'first' to see it.");
-    else if (game_time_end) print_two_part(result, "Type 'save' to keep the game or 'new' to play again.");
-    else print_two_part(result, "Type 'save' to keep the game, 'new' to play again or 'undo' to take back.");
+
+    print_wrapped(result, 0, NULL);
+    if (!game_auto) {
+        char c[160];
+        assist_count_text(c, sizeof(c));
+        if (assist_positions > 0 || assist_evals > 0) print_label("Help in this game", NULL, "%s", c);
+        else print_label("Help in this game", NULL, "none (no hint, no evaluation)");
+    }
+    printf("\n");
+    if (game_auto) print_wrapped("Type 'save' to keep the game, 'history' or 'first' to see it.", 0, NULL);
+    else if (game_time_end) print_wrapped("Type 'save' to keep the game or 'new' to play again.", 0, NULL);
+    else print_wrapped("Type 'save' to keep the game, 'new' to play again or 'undo' to take back.", 0, NULL);
 }
 
 static bool game_check_end(Position* pos) {
@@ -3271,6 +3896,7 @@ static void clock_after_move(Color c, long long used) {
 }
 
 static void post_head(void) {
+    post_block_end();
     char head[96];
     snprintf(head, sizeof(head), "%.*s", line_width(), (con_pov_you && !post_white) ? POST_HEAD_YOU : POST_HEAD_WHITE);
     put_styled(R_FRAME, head);
@@ -3285,6 +3911,8 @@ static bool search_line(Position* pos, SearchKind kind, char* line, size_t size,
     res_cp = res_mate_moves = 0;
     res_depth = 0;
     res_pv[0] = '\0';
+    res2_info = res2_mate = false;
+    res2_cp = res2_mate_moves = 0;
     search_interrupted = false;
     res_refused[0] = '\0';
     snprintf(search_fen, sizeof(search_fen), "%s", position_to_fen(pos));
@@ -3403,15 +4031,34 @@ static void human_turn(Position* pos) {
 }
 
 static void ponder_predict(Position* pos);
+
+static bool end_req = false, auto_read = false;
 static bool book_now = false;
+static bool top_held = false;
 
 static void game_engine_done(Position* pos, bool interrupted) {
     const long long used = elapsed_ms(search_started);
     const Color eng = pos->to_move;
     Move m;
     if (!game_on || game_over || (eng == game_human && !game_auto)) return;
+    if (end_req) {
+        end_req = false;
+        return;
+    }
     if (game_auto && interrupted) {
         game_end("Autoplay stopped. The game is unfinished (*).");
+        return;
+    }
+    if (pause_req) {
+        pause_req = false;
+        if (tc_limited(eng) && game_clock[eng] - move_used(eng, used) < 0) {
+            game_clock[eng] -= used;
+            game_time_loss(pos, eng);
+            return;
+        }
+        if (tc_limited(eng)) game_clock[eng] -= move_used(eng, used);
+        eng_paused = true;
+        pause_echo = true;
         return;
     }
     if (res_refused[0]) {
@@ -3432,6 +4079,9 @@ static void game_engine_done(Position* pos, bool interrupted) {
         game_time_loss(pos, eng);
         return;
     }
+
+    bool topped = top_held;
+    top_held = false;
     if (draw_offer) {
         draw_offer = false;
         const bool accept = res_info && (res_mate ? res_mate_moves < 0 : res_cp <= 0);
@@ -3439,8 +4089,11 @@ static void game_engine_done(Position* pos, bool interrupted) {
             game_end("Chessenger accepts the draw. 1/2-1/2");
             return;
         }
+        if (!topped) screen_top();
+        topped = true;
         printf("Chessenger declines the draw.\n");
     }
+    if (!topped) screen_top();
     if (book_now) game_eval_have = false;
     if (res_info) {
         const int sign = eng == WHITE ? 1 : -1;
@@ -3465,34 +4118,37 @@ static void game_engine_done(Position* pos, bool interrupted) {
     human_turn(pos);
 }
 
+static void assist_done(Position* pos, const Move* m);
+
 static void hint_done(Position* pos) {
     Move m;
+    const bool hint = assist_next == AS_HINT;
+    assist_next = AS_HINT;
     if (res_refused[0]) {
         char text[200];
-        snprintf(text, sizeof(text), "No hint: the engine position is invalid (%s). Type 'setboard' or 'new'.",
-                 res_refused);
+        snprintf(text, sizeof(text), "No %s: the engine position is invalid (%s). Type 'setboard' or 'new'.",
+                 hint ? "hint" : "search", res_refused);
         print_wrapped(text, 0, NULL);
         return;
     }
     if (!res_move_ok || !legal_match(pos, &res_move, &m)) {
-        printf("No hint: Chessenger found no move here.\n");
+        printf("No %s: Chessenger found no move here.\n", hint ? "hint" : "search");
         return;
     }
-    char san[16];
-    if (!move_to_san(pos, m, san, sizeof(san))) snprintf(san, sizeof(san), "%s", move_to_string(&m));
     if (!res_info) {
-        printf("Hint: %s\n", san);
+        char san[16];
+        if (!move_to_san(pos, m, san, sizeof(san))) snprintf(san, sizeof(san), "%s", move_to_string(&m));
+
+        if (hint) printf("Hint: %s\n", san);
+        else printf("Search: no score, the search printed no lines ('post on' shows them). Best move: %s.\n", san);
         return;
     }
-
-    const bool you = game_on && !game_over && !game_auto && con_pov_you && pos->to_move == game_human;
-    const int sign = you ? 1 : (pos->to_move == WHITE ? 1 : -1);
-    char score[24];
-    Role role;
-    shown_score(sign, score, sizeof(score), &role);
-    printf("Hint: %s (eval ", san);
-    put_styled(role, score);
-    printf(" (%s))\n", you ? "you" : "White");
+    if (hint) assist_done(pos, &m);
+    else {
+        assist_next = AS_EVAL;
+        assist_done(pos, &m);
+        assist_next = AS_HINT;
+    }
 }
 
 static void strength_short(char* buf, size_t n) {
@@ -3527,11 +4183,17 @@ static void game_start(Position* pos, Color human, const TimeControl tc_in[2], b
     snprintf(game_result, sizeof(game_result), "*");
     game_auto = autoplay;
     clock_paused = false;
+    pause_req = eng_paused = pause_echo = false;
+    end_req = auto_read = false;
     book_out = false;
     game_human = autoplay ? WHITE : human;
     if (!autoplay) human_last = human;
     con_flipped = (human == BLACK) && !autoplay;
     game_eval_have = false;
+    assist_evals = assist_positions = assist_shown = 0;
+    assist_last_shown = false;
+    assist_last_hist = -1;
+    hint_memo.have = false;
     game_tc[WHITE] = tc[WHITE];
     game_tc[BLACK] = tc[BLACK];
     game_tc_start = con_tc_start && !autoplay;
@@ -3558,14 +4220,17 @@ static void game_start(Position* pos, Color human, const TimeControl tc_in[2], b
         snprintf(text, sizeof(text), "  %s: %s, %s", c == WHITE ? "White" : "Black", you ? "You" : engine, t);
         print_wrapped(text, 9, NULL);
     }
+
+    printf("\n");
     if (con_prompt && !autoplay && strength_limited()) {
-        print_wrapped("Stronger Chessenger: type 'strength 2000' (any 1200-2800) or 'strength full'.", 0, NULL);
-        print_wrapped("In 'autoplay', 'analyze' and 'annotate' Chessenger always has full strength.", 0, NULL);
+        print_command("strength 2000", "stronger Chessenger (any " STRENGTH_ELO_RANGE_TEXT ")");
+        print_command("strength full", "full strength (always in autoplay, analyze and annotate)");
     }
-    if (autoplay) snprintf(text, sizeof(text), "Type 'stop' or press Ctrl+C to end it.");
-    else snprintf(text, sizeof(text), "Type %s'help game' for game commands.",
-                  con_post ? "" : "'post on' to watch Chessenger think, ");
-    print_wrapped(text, 0, NULL);
+    if (autoplay) print_command("stop", "end it (or press Ctrl+C)");
+    else {
+        if (!con_post) print_command("post on", "watch Chessenger think");
+        print_command("help game", "game commands");
+    }
     if (con_prompt) printf("\n");
     own_push(OWN_NEWGAME);
     own_push(OWN_POSITION);
@@ -3772,10 +4437,27 @@ static bool book_pick(Position* pos, Move* out) {
     return true;
 }
 
+static int replay_wait(long ms);
+#define AUTO_BOOK_MS 1000
+
 static bool engine_turn(Position* pos, char* line, size_t size) {
-    const struct timeval start = get_wall_time();
+    struct timeval start = get_wall_time();
     Move m;
     if (!book_pick(pos, &m)) return engine_go_line(pos, line, size);
+
+    if (game_auto && con_prompt) {
+        const int w = replay_wait(AUTO_BOOK_MS);
+        if (w == 1) {
+            game_end("Autoplay stopped. The game is unfinished (*).");
+            return false;
+        }
+        if (w == 2) {
+            char q[8];
+            auto_read = !console_queued_line(q, sizeof(q));
+            return false;
+        }
+        start = get_wall_time();
+    }
     search_started = start;
     res_info = res_mate = false;
     res_cp = res_mate_moves = res_depth = 0;
@@ -3888,6 +4570,8 @@ static bool own_step_line(Position* pos, OwnStep step, char* line, size_t size) 
             return search_line(pos, SK_MATE, line, size, own_go);
         case OWN_SHOW:
             nav_show(pos);
+            if (load_to_move) print_to_move(pos);
+            load_to_move = false;
             return false;
         case OWN_ANNOTATE:
             return annotate_step(pos, line, size);
@@ -3906,7 +4590,12 @@ static bool own_step_line(Position* pos, OwnStep step, char* line, size_t size) 
             return true;
         case OWN_SETBOARD:
             print_board(pos);
+            print_to_move(pos);
             return false;
+        case OWN_LINES:
+            snprintf(line, size, "setoption name MultiPV value %d", own_lines);
+            cap_quiet = capture_begin();
+            return true;
     }
     return false;
 }
@@ -3947,10 +4636,12 @@ static void game_human_move(Position* pos, const char* line) {
         else printf("Chessenger plays both sides now: 'stop' ends the autoplay.\n");
         return;
     }
+    if (eng_paused_says()) return;
     Move m;
     if (!typed_move_read(pos, tok, &m)) return;
     rest = split_word(rest, next, sizeof(next), false);
     if (is_ep_remark(next)) rest = split_word(rest, next, sizeof(next), false);
+    screen_top();
     if (next[0]) printf("One move a turn: the rest of the line is not played.\n");
     const long long used = human_used(get_wall_time());
     clock_paused = false;
@@ -4008,9 +4699,10 @@ static void cmd_play(Position* pos, const char* arg) {
     TimeControl tc[2];
     bool have_tc = false;
     if (!parse_game_args(arg, &human, tc, &have_tc)) {
-        printf("Usage: play [white|black] [T], T = 2+1 | 10 | 40/90 | 40/90+30 ('help time').\n");
+        printf("Usage: play [white|black] [T], T = 2+1 | 10 | 40/90 | 40/90+30 | infinite ('help time').\n");
         return;
     }
+    if (tc_refuse_engine(tc, human, false, "play", !have_tc)) return;
     if (have_tc) {
         con_tc[WHITE] = tc[WHITE];
         con_tc[BLACK] = tc[BLACK];
@@ -4027,6 +4719,7 @@ static void cmd_autoplay(Position* pos, const char* arg) {
         printf("Usage: autoplay [T [T2]], T = 2+1 | 10 | 40/90 | 40/90+30 ('help time').\n");
         return;
     }
+    if (tc_refuse_engine(tc, WHITE, true, "autoplay", !have_tc)) return;
     if (have_tc) {
         con_tc[WHITE] = tc[WHITE];
         con_tc[BLACK] = tc[BLACK];
@@ -4045,6 +4738,7 @@ static void cmd_redo(Position* pos, const char* arg) {
         return;
     }
     if (extra_text(rest, "redo", "redo [N]")) return;
+    if (eng_paused_says()) return;
     if (redo_count == 0) {
         printf("Nothing to redo.\n");
         return;
@@ -4064,6 +4758,7 @@ static void cmd_redo(Position* pos, const char* arg) {
     int saved_count = redo_count;
     if (!saved) return;
     memcpy(saved, redo_stack, (size_t)redo_count * sizeof(HistoryEntry));
+    if (game_on) screen_top();
     for (long i = 0; i < half; i++) {
         const HistoryEntry e = saved[saved_count - 1];
         Move m;
@@ -4086,6 +4781,7 @@ static void cmd_redo(Position* pos, const char* arg) {
 
 static void cmd_switch(Position* pos) {
     history_check(pos);
+    if (eng_paused_says()) return;
     if (!game_on) {
         printf("No game in progress. Type 'play' to start one.\n");
         return;
@@ -4142,8 +4838,23 @@ static void cmd_resign(Position* pos) {
     game_end(text);
 }
 
+static void cmd_end(Position* pos) {
+    history_check(pos);
+    end_req = false;
+    if (!game_on) {
+        printf("No game in progress.\n");
+        return;
+    }
+    if (game_over) {
+        say_game_over();
+        return;
+    }
+    game_end(game_auto ? "Autoplay ended. The game is unfinished (*)." : "You ended the game. It is unfinished (*).");
+}
+
 static void cmd_draw(Position* pos, const char* arg) {
     history_check(pos);
+    if (eng_paused_says()) return;
     if (!game_on) {
         printf("No game in progress.\n");
         return;
@@ -4179,37 +4890,378 @@ static bool tb_hint(Position* pos, int legal) {
         if (!move_to_san(pos, tb[0], san, sizeof(san))) snprintf(san, sizeof(san), "%s", move_to_string(&tb[0]));
         const bool you = game_on && !game_over && !game_auto && pos->to_move == game_human;
         const Color winner = wdl > 0 ? pos->to_move : (pos->to_move == WHITE ? BLACK : WHITE);
-        snprintf(text, sizeof(text), "Hint: %s (tablebase: %s%s)", san,
+        snprintf(text, sizeof(text), "%s (tablebase: %s%s)", san,
                  you ? (wdl > 0 ? "you win" : "you lose") : (winner == WHITE ? "White wins" : "Black wins"),
                  wdl < 0 ? "; this move holds out longest" : "");
     } else if (n == legal && n > 1) {
-        snprintf(text, sizeof(text), "Hint: any move (tablebase: draw)");
+        snprintf(text, sizeof(text), "any move (tablebase: draw)");
     } else {
-        int len = snprintf(text, sizeof(text), "Hint:");
+        int len = 0;
         for (int i = 0; i < n && len < (int)sizeof(text) - 64; i++) {
             if (!move_to_san(pos, tb[i], san, sizeof(san))) snprintf(san, sizeof(san), "%s", move_to_string(&tb[i]));
-            len += snprintf(text + len, sizeof(text) - (size_t)len, "%s %s", i == 0 ? "" : i == n - 1 ? " or" : ",", san);
+            len += snprintf(text + len, sizeof(text) - (size_t)len, "%s%s", i == 0 ? "" : i == n - 1 ? " or " : ", ", san);
         }
         if (n == 1) snprintf(text + len, sizeof(text) - (size_t)len, " (tablebase: draw; the only move that keeps it)");
         else snprintf(text + len, sizeof(text) - (size_t)len, " (tablebase: draw; %d of %d moves keep it)", n, legal);
     }
-    print_wrapped(text, 0, NULL);
+    print_label("Hint", " (tablebase", "%s", text);
     return true;
+}
+
+static bool parse_seconds(const char* w, long* ms) {
+    char* end = NULL;
+    const double sec = strtod(w, &end);
+    if (!w[0] || !end || end == w || *end != '\0' || strspn(w, "0123456789.") != strlen(w) || sec < 0.1 || sec > 3600)
+        return false;
+    *ms = (long)(sec * 1000.0 + 0.5);
+    return true;
+}
+
+static void pv_san(const char* fen, const char* pv, char* out, size_t n);
+static int mate_length(Position* p, int plies, Move* first);
+static bool mate_line_full(const char* fen, const char* pv, int plies, char* out, size_t n);
+
+static bool assist_game(void) {
+    return game_on && !game_over && !game_auto;
+}
+
+static const char* side_label(Color c) {
+    if (game_on && !game_auto) return c == game_human ? (c == WHITE ? "White (you)" : "Black (you)")
+                                                      : (c == WHITE ? "White (Chessenger)" : "Black (Chessenger)");
+    return c == WHITE ? "White" : "Black";
+}
+
+static const char* piece_word(int t) {
+    static const char* NAME[6] = { "pawn", "rook", "knight", "bishop", "queen", "king" };
+    return t >= PAWN && t <= KING ? NAME[t] : "piece";
+}
+
+static void advantage_text(int cp, int mate, char* buf, size_t n) {
+    if (mate != 0) {
+        snprintf(buf, n, "%s mates in %d", side_label(mate > 0 ? WHITE : BLACK), mate > 0 ? mate : -mate);
+        return;
+    }
+    const int a = cp < 0 ? -cp : cp;
+    if (a < 25) snprintf(buf, n, "the position is equal");
+    else snprintf(buf, n, "%s is %s", side_label(cp > 0 ? WHITE : BLACK),
+                  a < 75 ? "slightly better" : a < 150 ? "better" : a < 300 ? "clearly better" : "winning");
+}
+
+static void material_short(int bal, char* buf, size_t n) {
+    const int a = bal < 0 ? -bal : bal;
+    if (bal == 0) snprintf(buf, n, "material is equal");
+    else snprintf(buf, n, "%s is %d point%s up", side_label(bal > 0 ? WHITE : BLACK), a, a == 1 ? "" : "s");
+}
+
+static void material_words(int bal, char* buf, size_t n) {
+    const int a = bal < 0 ? -bal : bal;
+    if (bal == 0) snprintf(buf, n, "material is equal");
+    else snprintf(buf, n, "%s is %d point%s up in material", side_label(bal > 0 ? WHITE : BLACK), a, a == 1 ? "" : "s");
+}
+
+static bool pv_head(const char* pv, int most, char* out, size_t n) {
+    out[0] = '\0';
+    size_t len = 0;
+    char tok[16];
+    const char* s = pv ? pv : "";
+    for (int k = 0; k < most && *s; k++) {
+        s = split_word(s, tok, sizeof(tok), false);
+        if (!tok[0]) break;
+        const int w = snprintf(out + len, n - len, "%s%s", k ? " " : "", tok);
+        if (w < 0 || len + (size_t)w >= n) break;
+        len += (size_t)w;
+    }
+    while (*s == ' ') s++;
+    return *s != '\0';
+}
+
+static int exchange_points(Position* p, int sq, int depth) {
+    static const int VALUE[7] = { 1, 5, 3, 3, 9, 100, 0 };
+    if (depth >= 32) return 0;
+    Move list[MAX_MOVES];
+    const int n = generate_legal_moves(p, list);
+    int best = -1;
+    for (int i = 0; i < n; i++)
+        if (list[i].to == sq && list[i].captured != EMPTY && (best < 0 || VALUE[(int)list[i].piece] < VALUE[(int)list[best].piece]))
+            best = i;
+    if (best < 0) return 0;
+    const int sign = p->to_move == WHITE ? 1 : -1, before = material_balance(p);
+    Move m = list[best];
+    UndoInfo u;
+    make_move_full(p, &m, &u);
+    const int gain = sign * (material_balance(p) - before) - exchange_points(p, sq, depth + 1);
+    undo_move_full(p, &m, &u);
+    return gain > 0 ? gain : 0;
+}
+
+static int move_gain(const Position* pos, const Move* m) {
+    Position tmp = *pos;
+    Move mv = *m;
+    UndoInfo u;
+    const int sign = pos->to_move == WHITE ? 1 : -1, before = material_balance(pos);
+    make_move_full(&tmp, &mv, &u);
+    return sign * (material_balance(&tmp) - before) - exchange_points(&tmp, mv.to, 0);
+}
+
+static bool move_gives_check(const Position* pos, const Move* m) {
+    Position tmp = *pos;
+    Move mv = *m;
+    UndoInfo u;
+    make_move_full(&tmp, &mv, &u);
+    return is_in_check(&tmp, tmp.to_move);
+}
+
+static int threat_mate(Position* pos, char* san, size_t n) {
+    san[0] = '\0';
+    if (is_in_check(pos, pos->to_move)) return 0;
+    char fen[128], turned[128];
+    snprintf(fen, sizeof(fen), "%s", position_to_fen(pos));
+    char* side = strchr(fen, ' ');
+    char* castle = side ? strchr(side + 1, ' ') : NULL;
+    char* ep = castle ? strchr(castle + 1, ' ') : NULL;
+    if (!ep) return 0;
+    side[1] = side[1] == 'w' ? 'b' : 'w';
+    const char* after = strchr(ep + 1, ' ');
+    snprintf(turned, sizeof(turned), "%.*s -%s", (int)(ep - fen), fen, after ? after : "");
+    Position tmp;
+    if (!parse_fen(&tmp, turned)) return 0;
+    Move first;
+    const int plies = mate_length(&tmp, 3, &first);
+    if (plies == 0) return 0;
+    if (!move_to_san(&tmp, first, san, n)) snprintf(san, n, "%s", move_to_string(&first));
+    return (plies + 1) / 2;
+}
+
+static void assist_count(const Position* pos, bool hint) {
+    if (!assist_game()) return;
+    if (!hint) {
+        assist_evals++;
+        return;
+    }
+    if (pos->hash != assist_last_hash || hist_count != assist_last_hist) {
+        assist_positions++;
+        assist_last_shown = false;
+    }
+    assist_last_hash = pos->hash;
+    assist_last_hist = hist_count;
+}
+
+static void assist_count_shown(void) {
+    if (!assist_game() || assist_last_shown) return;
+    assist_shown++;
+    assist_last_shown = true;
+}
+
+static void assist_count_line(void) {
+    if (!assist_game()) return;
+    char c[160];
+    assist_count_text(c, sizeof(c));
+    printf("\n");
+    print_label("Help so far", NULL, "%s", c);
+}
+
+static void memo_score(const Position* pos, char* score, size_t n, const char** who) {
+    const bool you = game_on && !game_over && !game_auto && con_pov_you && pos->to_move == game_human;
+    const int sign = you ? 1 : (pos->to_move == WHITE ? 1 : -1);
+    *who = you ? "you" : "White";
+    if (hint_memo.mate) {
+        const int mm = sign * hint_memo.mate_moves;
+        snprintf(score, n, mm >= 0 ? "#%d" : "-#%d", mm >= 0 ? mm : -mm);
+    } else format_eval(sign * hint_memo.cp, 0, score, n);
+}
+
+static void hint_say(Position* pos) {
+
+    char san[16], score[24], adv[96], line[700], head[256], mat[96], thr[16], full[1200];
+    const char* who = "White";
+    Move m = hint_memo.move;
+    if (!move_to_san(pos, m, san, sizeof(san))) snprintf(san, sizeof(san), "%s", move_to_string(&m));
+    const Color us = pos->to_move, them = us == WHITE ? BLACK : WHITE;
+    const int sign = us == WHITE ? 1 : -1;
+    const int wmate = hint_memo.mate ? sign * hint_memo.mate_moves : 0;
+    char wscore[24];
+    format_eval(sign * hint_memo.cp, wmate, wscore, sizeof(wscore));
+    advantage_text(sign * hint_memo.cp, wmate, adv, sizeof(adv));
+    const int now = material_balance(pos);
+    const int gain = move_gain(pos, &m);
+    const int threat = threat_mate(pos, thr, sizeof(thr));
+    const bool check = move_gives_check(pos, &m);
+    const bool mating = hint_memo.mate && hint_memo.mate_moves > 0, mated = hint_memo.mate && hint_memo.mate_moves < 0;
+    if (hint_memo.level == 1) {
+        if (mating) {
+            print_label("Hint 1 of 3", NULL, "there is a mate in %d", hint_memo.mate_moves);
+            print_label("", NULL, "look for a forcing move (the first move %s)", check ? "gives check" : "is not a check");
+        } else {
+            const bool capture = m.captured != EMPTY || m.is_en_passant;
+            const char* kind = m.is_castling ? "castling" : (m.promotion != EMPTY && m.promotion != PAWN) ? "a promotion"
+                             : capture && check ? "a capture with check" : capture ? "a capture" : check ? "a check"
+                             : m.piece == PAWN ? "a pawn move" : "a quiet piece move (no capture, no check)";
+            print_label("Hint 1 of 3", NULL, "the best move is %s", kind);
+            if (mated) {
+                print_label("", NULL, "the search sees %s mated in %d whatever it plays", side_label(us),
+                            -hint_memo.mate_moves);
+                print_label("", NULL, "this move holds out longest");
+            } else {
+                print_label("After it", NULL, "%s (%s)", adv, wscore);
+                if (gain > 0) print_label("Material", NULL, "the move wins %d point%s", gain, gain == 1 ? "" : "s");
+            }
+        }
+
+        if (threat) {
+            printf("\n");
+            print_label("Threat of mate", NULL, "%s threatens mate in %d", side_label(them), threat);
+        }
+        printf("\n");
+        print_label("More", NULL, "type 'hint' again for the piece");
+    } else if (hint_memo.level == 2) {
+        print_label("Hint 2 of 3", NULL, "move the %s on %s%s", piece_word(m.piece), square_to_string(m.from),
+                    m.is_castling ? " (castling)" : "");
+        printf("\n");
+        print_label("More", NULL, "type 'hint' again for the move and why");
+    } else {
+        memo_score(pos, score, sizeof(score), &who);
+        const char* view = strcmp(who, "you") == 0 ? "your" : "White's";
+        print_label("Hint 3 of 3", NULL, "%s", san);
+        if (hint_memo.mate) print_label("Eval", NULL, "%s (%s view)", score, view);
+        else print_label("Eval", NULL, "%s (%s view, depth %d)", score, view, hint_memo.depth);
+        if (mating) {
+            const bool whole = mate_line_full(hint_memo.fen, hint_memo.pv, 2 * hint_memo.mate_moves - 1, full,
+                                              sizeof(full));
+            pv_san(hint_memo.fen, whole ? full : hint_memo.pv, line, sizeof(line));
+            printf("\n");
+            print_label("Main line", NULL, "%s%s", line, whole ? "" : " (the line is not complete)");
+            printf("\n");
+            print_label("Why", NULL, "it mates in %d", hint_memo.mate_moves);
+        } else {
+            const bool more = pv_head(hint_memo.pv, 10, head, sizeof(head));
+            pv_san(hint_memo.fen, head, line, sizeof(line));
+            if (more) strncat(line, " ...", sizeof(line) - strlen(line) - 1);
+            material_short(now + sign * gain, mat, sizeof(mat));
+            printf("\n");
+            print_label("Main line", NULL, "%s", line);
+            printf("\n");
+            if (mated) {
+                print_label("Why", NULL, "the search sees %s mated in %d whatever it plays", side_label(us),
+                            -hint_memo.mate_moves);
+                print_label("", NULL, "this move holds out longest");
+            } else if (gain != 0) {
+                print_label("Why", NULL, "the move %s %d point%s of material", gain > 0 ? "wins" : "gives up",
+                            gain > 0 ? gain : -gain, gain == 1 || gain == -1 ? "" : "s");
+                print_label("", NULL, "after the exchange on %s, %s", square_to_string(m.to), mat);
+                if (gain < 0) print_label("", NULL, "and the search still rates it best");
+            } else if (now != 0) print_label("Why", NULL, "the move does not change material (%s)", mat);
+            else {
+                print_label("Why", NULL, "material is equal and the move does not change it,");
+                print_label("", NULL, "so the score comes from the position");
+            }
+        }
+        if (threat && !mated) {
+            printf("\n");
+            print_label("Threat of mate", NULL, "%s threatened mate in %d (%s)", side_label(them), threat, thr);
+            print_label("", NULL, "this move stops it (the search sees no mate)");
+        }
+    }
+}
+
+static void eval_say(Position* pos) {
+    char adv[96], score[24], mat[96], line[700], head[256], full[1200], thr[16];
+    const Color us = pos->to_move, them = us == WHITE ? BLACK : WHITE;
+    const int sign = us == WHITE ? 1 : -1;
+    const int wcp = sign * res_cp, wmate = res_mate ? sign * res_mate_moves : 0;
+    format_eval(wcp, wmate, score, sizeof(score));
+    advantage_text(wcp, wmate, adv, sizeof(adv));
+
+    printf("\n");
+    if (res_mate) print_label("Search", NULL, "%s (White's view): %s", score, adv);
+    else {
+        char label[32];
+        snprintf(label, sizeof(label), "Search, depth %d", res_depth);
+        print_label(label, NULL, "%s (White's view): %s", score, adv);
+    }
+    const int now = material_balance(pos);
+    if (now == 0) snprintf(mat, sizeof(mat), "equal");
+    else snprintf(mat, sizeof(mat), "%s is %d point%s up", side_label(now > 0 ? WHITE : BLACK), now < 0 ? -now : now,
+                  now == 1 || now == -1 ? "" : "s");
+    print_label("Material", " (pawn", "%s (pawn 1, knight 3, bishop 3, rook 5, queen 9)", mat);
+    bool whole = false;
+    if (res_mate && res_mate_moves > 0) whole = mate_line_full(search_fen, res_pv, 2 * res_mate_moves - 1, full,
+                                                               sizeof(full));
+    const bool more = !whole && pv_head(res_pv, 12, head, sizeof(head));
+    pv_san(search_fen, whole ? full : head, line, sizeof(line));
+    if (more) strncat(line, " ...", sizeof(line) - strlen(line) - 1);
+    printf("\n");
+    print_label("Main line", NULL, "%s", line[0] ? line : "(none)");
+
+    char end_words[96], first_tok[16], first_san[16];
+    material_words(now, end_words, sizeof(end_words));
+    int gain = 0;
+    Move first;
+    split_word(res_pv, first_tok, sizeof(first_tok), false);
+    if (first_tok[0] && parse_move_human(pos, first_tok, &first) == SAN_OK) {
+        gain = move_gain(pos, &first);
+        if (!move_to_san(pos, first, first_san, sizeof(first_san))) snprintf(first_san, sizeof(first_san), "%s", first_tok);
+    }
+    const int lead = (now > 0) - (now < 0), favour = (wcp >= 25) - (wcp <= -25);
+    printf("\n");
+    if (wmate != 0) print_label("What decides", NULL, "the mate, %s", adv);
+    else if (gain != 0) {
+        char after[96];
+        material_short(now + sign * gain, after, sizeof(after));
+        print_label("What decides", NULL, "material: the best move %s %s %d point%s of material", first_san,
+                    gain > 0 ? "wins" : "gives up", gain > 0 ? gain : -gain, gain == 1 || gain == -1 ? "" : "s");
+        print_label("", NULL, "after the exchange on %s, %s", square_to_string(first.to), after);
+        if (gain < 0) print_label("", NULL, "and the search still rates it best");
+    } else if (now != 0 && favour != 0 && favour != lead)
+        print_label("What decides", NULL, "the position, not material: %s, but the search rates %s better", end_words,
+                    side_label(favour > 0 ? WHITE : BLACK));
+    else if (now != 0) print_label("What decides", NULL, "material: %s, and the best move does not change it", end_words);
+    else print_label("What decides", NULL, "the position, not material: material is equal, and the best move does "
+                     "not change it");
+    printf("\n");
+    if (is_in_check(pos, us)) print_label("Threat of mate", NULL, "%s is in check now", side_label(us));
+    else {
+        const int k = threat_mate(pos, thr, sizeof(thr));
+        if (k) {
+            print_label("Threat of mate", NULL, "%s threatens mate in %d (%s)", side_label(them), k, thr);
+            print_label("", NULL, "(if it were its move)");
+        } else print_label("Threat of mate", NULL, "none in 1 or 2 moves for %s", side_label(them));
+    }
+}
+
+static void assist_done(Position* pos, const Move* m) {
+    if (assist_next == AS_EVAL) {
+        eval_say(pos);
+        assist_count_line();
+        return;
+    }
+    hint_memo.have = true;
+    hint_memo.hash = pos->hash;
+    hint_memo.hist = hist_count;
+    hint_memo.level = hint_level_next;
+    hint_memo.ms = assist_ms;
+    hint_memo.move = *m;
+    hint_memo.mate = res_mate;
+    hint_memo.cp = res_cp;
+    hint_memo.mate_moves = res_mate_moves;
+    hint_memo.depth = res_depth;
+    snprintf(hint_memo.fen, sizeof(hint_memo.fen), "%s", search_fen);
+    snprintf(hint_memo.pv, sizeof(hint_memo.pv), "%s", res_pv);
+    hint_say(pos);
+    assist_count_line();
+}
+
+static long assist_default_ms(const Position* pos) {
+    const TimeControl* tc = (game_on && !game_over) ? &game_tc[pos->to_move] : &con_tc[pos->to_move];
+    return (tc->kind == TC_DEPTH || tc->kind == TC_NODES) ? 0 : 1000;
 }
 
 static void cmd_hint(Position* pos, const char* arg) {
     char w[32];
     const char* rest = split_word(arg, w, sizeof(w), false);
     long ms = 0;
-    if (w[0]) {
-        char* end = NULL;
-        const double sec = strtod(w, &end);
-        if (rest[0] || !end || end == w || *end != '\0' || strspn(w, "0123456789.") != strlen(w) || sec < 0.1 ||
-            sec > 3600) {
-            printf("Usage: hint [S], S = seconds to think (0.1-3600; default 1).\n");
-            return;
-        }
-        ms = (long)(sec * 1000.0 + 0.5);
+    if (w[0] && (rest[0] || !parse_seconds(w, &ms))) {
+        printf("Usage: hint [S], S = seconds to think (0.1-3600; default 1).\n");
+        return;
     }
     history_check(pos);
     if (game_on && game_over) {
@@ -4222,8 +5274,26 @@ static void cmd_hint(Position* pos, const char* arg) {
         printf("No legal moves: %s\n", is_in_check(pos, pos->to_move) ? "checkmate." : "stalemate.");
         return;
     }
-    if (tb_hint(pos, legal)) return;
-    if (book_on && !uci_chess960) book_show(pos);
+    assist_count(pos, true);
+    if (tb_hint(pos, legal)) {
+        assist_count_shown();
+        assist_count_line();
+        return;
+    }
+    const bool same = hint_memo.have && hint_memo.hash == pos->hash && hint_memo.hist == hist_count;
+    const int level = same ? (hint_memo.level < 3 ? hint_memo.level + 1 : 3) : 1;
+    if (level == 3) assist_count_shown();
+
+    if (level == 3 && book_on && !uci_chess960) book_show(pos);
+    if (same && !(ms > 0 && (hint_memo.ms == 0 || ms > hint_memo.ms))) {
+        hint_memo.level = level;
+        hint_say(pos);
+        assist_count_line();
+        return;
+    }
+    hint_level_next = level;
+    assist_ms = ms > 0 ? ms : assist_default_ms(pos);
+    assist_next = AS_HINT;
     hint_ms = ms;
     if (ms > 0) printf("Chessenger thinks %g s ('stop' gives the hint at once).\n", ms / 1000.0);
     own_push(OWN_HINT);
@@ -4267,16 +5337,34 @@ static void cmd_clock(const Position* pos) {
     if (game_tc[eng].none) snprintf(ce, sizeof(ce), "no limit");
     else fmt_clock(clock_now(pos, eng), ce, sizeof(ce));
     if (game_auto)
-        snprintf(line, sizeof(line), "Clocks: White %s, Black %s; %s.", you, ce, t);
+        snprintf(line, sizeof(line), "Clocks: White %s%s, Black %s%s.", you,
+                 eng_paused && pos->to_move == WHITE ? " (paused)" : "", ce,
+                 eng_paused && pos->to_move == BLACK ? " (paused)" : "");
     else
-        snprintf(line, sizeof(line), "Clocks: you (%s) %s%s, Chessenger (%s) %s; %s.", game_human == WHITE ? "White" : "Black",
-                 you, clock_paused ? " (paused)" : "", eng == WHITE ? "White" : "Black", ce, t);
+        snprintf(line, sizeof(line), "Clocks: you (%s) %s%s, Chessenger (%s) %s%s.", game_human == WHITE ? "White" : "Black",
+                 you, clock_paused ? " (paused)" : "", eng == WHITE ? "White" : "Black", ce, eng_paused ? " (paused)" : "");
+    print_wrapped(line, 2, NULL);
+
+    snprintf(line, sizeof(line), "Time control: %s.", t);
     print_wrapped(line, 2, NULL);
 }
 
 static void cmd_pause(Position* pos) {
     char t[128];
     history_check(pos);
+    if (pause_echo) {
+        pause_echo = false;
+        if (game_on && !game_over && eng_paused) {
+            const Color eng = pos->to_move;
+            char c[16];
+            if (tc_limited(eng)) {
+                fmt_clock(game_clock[eng], c, sizeof(c));
+                snprintf(t, sizeof(t), "Paused: Chessenger's move waits, its clock stands at %s. 'pause' again: it thinks on.", c);
+            } else snprintf(t, sizeof(t), "Paused: Chessenger's move waits. 'pause' again: it thinks on.");
+            print_wrapped(t, 0, NULL);
+            return;
+        }
+    }
     if (!game_on) {
         printf("No game in progress: nothing to pause.\n");
         return;
@@ -4285,8 +5373,16 @@ static void cmd_pause(Position* pos) {
         printf("The game is over: nothing to pause.\n");
         return;
     }
+    if (eng_paused) {
+        eng_paused = false;
+
+        printf("%sChessenger thinks on its move.\n", (tc_limited(WHITE) || tc_limited(BLACK)) ? "Clocks running. " : "");
+        if (!game_auto) own_push(OWN_ENGINE);
+        return;
+    }
     if (game_auto) {
-        printf("Nothing to pause in autoplay: 'stop' ends it.\n");
+        eng_paused = true;
+        printf("Paused: the next move of autoplay waits. 'pause' again: it goes on; 'stop' ends it.\n");
         return;
     }
     if (game_tc[WHITE].kind != TC_CLOCK) {
@@ -4340,7 +5436,11 @@ static void cmd_time(Position* pos, const char* arg, const char* alias) {
         if (short_form && strcasecmp(alias, "st") == 0) printf("Usage: st S, S = seconds a move for Chessenger (1-3600).\n");
         else if (short_form && strcasecmp(alias, "sd") == 0) printf("Usage: sd N, N = search depth (1-%d).\n", MAX_DEPTH);
         else if (short_form) printf("Usage: sn N, N = nodes a move (1-999999999).\n");
-        else printf("Usage: time 2+1 | 10 | 40/90 | 40/90+30 | move S | depth N | nodes N.\n");
+        else printf("Usage: time 2+1 | 10 | 40/90 | 40/90+30 | infinite | move S | depth N | nodes N.\n");
+        message_gap();
+        return;
+    }
+    if (tc_refuse_engine(tc, setting_human(), false, "time", false)) {
         message_gap();
         return;
     }
@@ -4384,6 +5484,24 @@ static void cmd_post(const char* arg) {
     if (extra_text(rest, "post", "post on|off")) return;
     con_post = on;
     printf("Thinking lines: %s.\n", con_post ? "on" : "off");
+}
+
+static void cmd_scroll(const char* arg) {
+    char w[16];
+    const char* rest = split_word(arg, w, sizeof(w), true);
+    bool on = con_scroll;
+    if (strcmp(w, "on") == 0) on = true;
+    else if (strcmp(w, "off") == 0) on = false;
+    else if (w[0]) {
+        printf("Usage: scroll on|off\n");
+        return;
+    }
+    if (extra_text(rest, "scroll", "scroll on|off")) return;
+    con_scroll = on;
+    if (on) print_wrapped("Scrolling: on (every board and thinking line on new lines).", 0, NULL);
+    else print_wrapped("Scrolling: off (the board after a move at the top of the window, the thinking line written over).",
+                       0, NULL);
+    if (!screen_ansi()) print_wrapped("Here everything goes on new lines: no terminal with colors.", 0, NULL);
 }
 
 static void pgn_time_control(Color c, char* buf, size_t n) {
@@ -4436,7 +5554,34 @@ static void pgn_token(PgnOut* o, const char* t) {
     o->col += len;
 }
 
-static FILE* open_named(const char* name, const char* mode, bool argv_name) {
+static const char* expand_name(const char* name, char* out, size_t n) {
+    const char* typed = name;
+    size_t len = strlen(name);
+    if (len >= 2 && (name[0] == '"' || name[0] == '\'') && name[len - 1] == name[0]) {
+        name++;
+        len -= 2;
+    }
+    if (len + 1 > n) return typed;
+    snprintf(out, n, "%.*s", (int)len, name);
+#ifndef _WIN32
+    const char* home = getenv("HOME");
+    if (!home || !home[0]) return out;
+    size_t skip = 0;
+    if (out[0] == '~') skip = 1;
+    else if (strncmp(out, "$HOME", 5) == 0) skip = 5;
+    else if (strncmp(out, "${HOME}", 7) == 0) skip = 7;
+    if (skip && (out[skip] == '\0' || out[skip] == '/')) {
+        char tmp[MAX_UCI_LINE + 1024];
+        const int k = snprintf(tmp, sizeof(tmp), "%s%s", home, out + skip);
+        if (k > 0 && (size_t)k < sizeof(tmp) && (size_t)k < n) snprintf(out, n, "%s", tmp);
+    }
+#endif
+    return out;
+}
+
+static FILE* open_named(const char* name_typed, const char* mode, bool argv_name) {
+    char expanded[MAX_UCI_LINE + 1024];
+    const char* name = expand_name(name_typed, expanded, sizeof(expanded));
 #ifdef _WIN32
     UINT cp = CP_ACP;
     DWORD in_mode = 0;
@@ -4485,6 +5630,30 @@ static bool pgn_existing(const char* name, int* games, bool* ends_blank, bool* e
     return true;
 }
 
+static void print_saved_path(const char* name_typed) {
+    char full[4096], expanded[MAX_UCI_LINE + 1024];
+    const char* name = expand_name(name_typed, expanded, sizeof(expanded));
+#ifdef _WIN32
+    if (_fullpath(full, name, sizeof(full))) {
+        printf("Path: %s\n", full);
+        return;
+    }
+    char cwd[2048];
+    if (name[0] != '\\' && name[0] != '/' && !(name[0] && name[1] == ':') && _getcwd(cwd, sizeof(cwd)))
+        printf("Path: %s\\%s\n", cwd, name);
+    else
+        printf("Path: %s\n", name);
+#else
+    if (realpath(name, full)) {
+        printf("Path: %s\n", full);
+        return;
+    }
+    char cwd[2048];
+    if (name[0] != '/' && getcwd(cwd, sizeof(cwd))) printf("Path: %s/%s\n", cwd, name);
+    else printf("Path: %s\n", name);
+#endif
+}
+
 static void cmd_save(Position* pos, const char* arg) {
     history_check(pos);
     time_t now = time(NULL);
@@ -4510,31 +5679,52 @@ static void cmd_save(Position* pos, const char* arg) {
 
     char engine[64], tc[48], tc_black[48];
     snprintf(engine, sizeof(engine), "Chessenger %s", ENGINE_VERSION);
-
-    const char* white = pgn_player(WHITE, engine);
-    const char* black = pgn_player(BLACK, engine);
-    const char* result = pgn_result(pos);
-    pgn_time_control(WHITE, tc, sizeof(tc));
-    pgn_time_control(BLACK, tc_black, sizeof(tc_black));
-    fprintf(f, "[Event \"Casual game\"]\n[Site \"?\"]\n[Date \"%s\"]\n[Round \"-\"]\n", date_tag);
-    fprintf(f, "[White \"%s\"]\n[Black \"%s\"]\n[Result \"%s\"]\n", white, black, result);
-    if (pgn_time_split()) fprintf(f, "[WhiteTimeControl \"%s\"]\n[BlackTimeControl \"%s\"]\n", tc, tc_black);
-    else fprintf(f, "[TimeControl \"%s\"]\n", tc);
     Position start;
     setup_starting_position(&start);
-    if (strcmp(hist_base_fen, position_to_fen(&start)) != 0)
-        fprintf(f, "[SetUp \"1\"]\n[FEN \"%s\"]\n", hist_base_fen);
-    if ((game_on && game_over && game_time_end) || (game_viewed && game_viewed_time && redo_count == 0))
-        fprintf(f, "[Termination \"time forfeit\"]\n");
+    const bool set_up = strcmp(hist_base_fen, position_to_fen(&start)) != 0;
+
+    const char* result;
+    if (rec_on) {
+        result = record_get("Result");
+        if (!result || !result[0]) result = "*";
+        for (int i = 0; i < rec_tags; i++) {
+            fprintf(f, "[%s \"", rec_name[i]);
+            for (const char* v = rec_value[i]; *v; v++) {
+                if (*v == '"' || *v == '\\') fputc('\\', f);
+                fputc(*v, f);
+            }
+            fputs("\"]\n", f);
+        }
+        if (!record_get("Result")) fprintf(f, "[Result \"%s\"]\n", result);
+        if (set_up && !record_get("FEN")) fprintf(f, "[SetUp \"1\"]\n[FEN \"%s\"]\n", hist_base_fen);
+    } else {
+
+        const char* white = pgn_player(WHITE, engine);
+        const char* black = pgn_player(BLACK, engine);
+        result = game_on ? pgn_result(pos) : game_viewed ? game_result : redo_count == 0 ? pgn_result(pos) : "*";
+        pgn_time_control(WHITE, tc, sizeof(tc));
+        pgn_time_control(BLACK, tc_black, sizeof(tc_black));
+        fprintf(f, "[Event \"Casual game\"]\n[Site \"?\"]\n[Date \"%s\"]\n[Round \"-\"]\n", date_tag);
+        fprintf(f, "[White \"%s\"]\n[Black \"%s\"]\n[Result \"%s\"]\n", white, black, result);
+        if (pgn_time_split()) fprintf(f, "[WhiteTimeControl \"%s\"]\n[BlackTimeControl \"%s\"]\n", tc, tc_black);
+        else fprintf(f, "[TimeControl \"%s\"]\n", tc);
+        if (set_up) fprintf(f, "[SetUp \"1\"]\n[FEN \"%s\"]\n", hist_base_fen);
+        if ((game_on && game_over && game_time_end) || (game_viewed && game_viewed_time))
+            fprintf(f, "[Termination \"time forfeit\"]\n");
+    }
     fputc('\n', f);
 
     PgnOut o = { f, 0 };
-    for (int i = 0; i < hist_count; i++) {
+
+    const int total = hist_count + (game_on ? 0 : redo_count);
+    for (int i = 0; i < total; i++) {
+
+        const char* san = i < hist_count ? hist[i].san : redo_stack[redo_count - 1 - (i - hist_count)].san;
         char label[16], token[48];
         bool black_move;
         history_label(i, label, sizeof(label), &black_move);
-        if (!black_move || i == 0) snprintf(token, sizeof(token), "%s %s", label, hist[i].san);
-        else snprintf(token, sizeof(token), "%s", hist[i].san);
+        if (!black_move || i == 0) snprintf(token, sizeof(token), "%s %s", label, san);
+        else snprintf(token, sizeof(token), "%s", san);
         pgn_token(&o, token);
     }
     pgn_token(&o, result);
@@ -4550,7 +5740,7 @@ static void cmd_save(Position* pos, const char* arg) {
     char text[MAX_UCI_LINE + 64];
     snprintf(text, sizeof(text), "Saved: %s (game %d).", name, games + 1);
     if (game_on) leave_saved = hist_count;
-    print_wrapped(text, 2, NULL);
+    print_wrapped(text, 2, NULL);    print_saved_path(name);
 }
 
 static void current_prompt(const Position* pos, char* buf, size_t n);
@@ -4599,6 +5789,7 @@ static bool no_legal_moves(Position* pos, const char* lead) {
 
 static void print_best_move(Position* pos) {
     Move m;
+    printf("\n");
     if (res_refused[0]) {
         char text[200];
         snprintf(text, sizeof(text), "No search: the engine position is invalid (%s). Type 'setboard' or 'new'.", res_refused);
@@ -4623,16 +5814,44 @@ static void print_best_move(Position* pos) {
     printf(" for White), depth %d, %.2f s.\n", res_depth, (double)elapsed_ms(search_started) / 1000.0);
 }
 
-static void cmd_analyze(Position* pos) {
+static long analysis_ms = 0;
+
+#ifdef __wasi__
+
+int wasi_stop_delay_s(void) __attribute__((weak));
+#endif
+
+static void cmd_analyze(Position* pos, const char* arg) {
+    char w[32];
+    const char* rest = split_word(arg, w, sizeof(w), false);
+    long ms = 0;
+    if (w[0]) {
+        char* end = NULL;
+        const double sec = strtod(w, &end);
+        if (!end || end == w || *end != '\0' || strspn(w, "0123456789.") != strlen(w) || sec < 0.1 || sec > 86400) {
+            printf("Usage: analyze [N], N = seconds (0.1-86400; without N until 'stop').\n");
+            return;
+        }
+        if (extra_text(rest, "analyze", "analyze [N]")) return;
+        ms = (long)(sec * 1000.0 + 0.5);
+    }
     history_check(pos);
     if (game_on && !game_over) {
-        printf("Not during a game: 'hint' shows the move Chessenger suggests.\n");
+        printf("Not during a game: 'hint' gives a hint in up to three steps; 'end' stops the game.\n");
         return;
     }
     game_view_keep();
     game_on = game_over = false;
     analysis_on = true;
     analysis_first = true;
+    analysis_ms = ms;
+#ifdef __wasi__
+    if (ms == 0) {
+        const int delay = wasi_stop_delay_s ? wasi_stop_delay_s() : 60;
+        if (delay > 0)
+            printf("Here (WebAssembly) 'stop' works after %d s of analysis; 'analyze N' analyzes N seconds.\n", delay);
+    }
+#endif
 }
 
 static bool analysis_line(Position* pos, char* line, size_t size) {
@@ -4647,6 +5866,16 @@ static bool analysis_line(Position* pos, char* line, size_t size) {
         return false;
     }
     const char* side = pos->to_move == WHITE ? "White" : "Black";
+    if (analysis_ms > 0) {
+        char go[48];
+        if (analysis_first)
+            printf("Analyzing for %g s, %s to move. Type 'stop' to end; a typed move is played.\n", analysis_ms / 1000.0,
+                   side);
+        else printf("Analyzing for %g s, %s to move.\n", analysis_ms / 1000.0, side);
+        analysis_first = false;
+        snprintf(go, sizeof(go), "go movetime %ld", analysis_ms);
+        return search_line(pos, SK_ANALYZE, line, size, go);
+    }
     if (analysis_first) printf("Analyzing, %s to move. Type 'stop' to end; a typed move is played.\n", side);
     else printf("Analyzing, %s to move.\n", side);
     analysis_first = false;
@@ -4666,6 +5895,10 @@ static void cmd_stop(void) {
         printf("Analysis stopped.\n");
         return;
     }
+    if (game_on && !game_auto && !game_over && eng_paused) {
+        printf("Chessenger is not thinking: its move is paused ('pause' lets it think).\n");
+        return;
+    }
     if (game_on && game_auto && !game_over) {
         game_end("Autoplay stopped. The game is unfinished (*).");
         return;
@@ -4676,7 +5909,7 @@ static void cmd_stop(void) {
 static void cmd_go(Position* pos, const char* arg) {
     history_check(pos);
     if (game_on && !game_over) {
-        printf("Not during a game: 'hint' shows the move Chessenger suggests.\n");
+        printf("Not during a game: 'hint' gives a hint in up to three steps; 'end' stops the game.\n");
         return;
     }
     if (no_legal_moves(pos, "No search: ")) return;
@@ -4706,10 +5939,11 @@ static void cmd_go(Position* pos, const char* arg) {
         else if (tc->kind == TC_NODES) snprintf(go, sizeof(go), "go nodes %ld", tc->value);
         else {
 
+            const TimeControl* cw = con_tc[WHITE].none ? &con_tc[BLACK] : &con_tc[WHITE];
+            const TimeControl* cb = con_tc[BLACK].none ? &con_tc[WHITE] : &con_tc[BLACK];
             len = (size_t)snprintf(go, sizeof(go), "go wtime %ld btime %ld winc %ld binc %ld",
-                                   con_tc[WHITE].base_ms ? con_tc[WHITE].base_ms : con_tc[WHITE].inc_ms,
-                                   con_tc[BLACK].base_ms ? con_tc[BLACK].base_ms : con_tc[BLACK].inc_ms,
-                                   con_tc[WHITE].inc_ms, con_tc[BLACK].inc_ms);
+                                   cw->base_ms ? cw->base_ms : cw->inc_ms, cb->base_ms ? cb->base_ms : cb->inc_ms,
+                                   cw->inc_ms, cb->inc_ms);
             if (tc->moves > 0) snprintf(go + len, sizeof(go) - len, " movestogo %ld", tc->moves);
         }
     }
@@ -4725,22 +5959,35 @@ static void go_done(Position* pos) {
 
 static void cmd_mate(Position* pos, const char* arg) {
     history_check(pos);
-    char w[16];
+    const int most = (MAX_DEPTH + 1) / 2;
+    char w[16], w2[16], usage[112];
+    snprintf(usage, sizeof(usage), "mate [N] [S] or mate t S, N = moves (1-%d), S = seconds (0.1-3600; default 3)", most);
     const char* rest = split_word(arg, w, sizeof(w), false);
-    long n = 0;
-    if (!w[0] || !parse_count(w, strlen(w), 1, (MAX_DEPTH + 1) / 2, &n)) {
-        printf("Usage: mate N, N = moves (1-%d), for example 'mate 3'.\n", (MAX_DEPTH + 1) / 2);
+    rest = split_word(rest, w2, sizeof(w2), false);
+    long n = most, ms = 3000;
+    bool any = true, ok = true;
+    if (strcasecmp(w, "t") == 0) ok = w2[0] && parse_seconds(w2, &ms);
+    else if (w[0]) {
+        any = false;
+        ok = parse_count(w, strlen(w), 1, most, &n) && (!w2[0] || parse_seconds(w2, &ms));
+    }
+    if (!ok) {
+        printf("Usage: %s.\n", usage);
         return;
     }
-    char usage[48];
-    snprintf(usage, sizeof(usage), "mate N, N = moves (1-%d)", (MAX_DEPTH + 1) / 2);
     if (extra_text(rest, "mate", usage)) return;
     if (game_on && !game_over) {
-        printf("Not during a game: 'hint' shows the move Chessenger suggests.\n");
+        printf("Not during a game: 'hint' gives a hint in up to three steps; 'end' stops the game.\n");
         return;
     }
     if (no_legal_moves(pos, "No search: ")) return;
     mate_target = (int)n;
+    mate_any = any;
+    mate_cap_ms = ms;
+    mate_capped = false;
+    if (any) printf("Looking for a mate of any length, at most %g s ('stop' ends it).\n", ms / 1000.0);
+    else printf("Looking for a mate in %ld move%s or fewer, at most %g s ('stop' ends it).\n", n, n == 1 ? "" : "s",
+                ms / 1000.0);
     snprintf(own_go, sizeof(own_go), "go mate %ld", n);
     game_view_keep();
     game_on = game_over = false;
@@ -4841,7 +6088,7 @@ static bool mate_line_full(const char* fen, const char* pv, int plies, char* out
 }
 
 static void mate_done(Position* pos) {
-    (void)pos;
+    printf("\n");
     if (res_refused[0]) {
         char text[200];
         snprintf(text, sizeof(text), "No search: the engine position is invalid (%s). Type 'setboard' or 'new'.", res_refused);
@@ -4856,10 +6103,35 @@ static void mate_done(Position* pos) {
         print_wrapped(text, 2, NULL);
         return;
     }
-    printf("No mate in %d found (depth %d searched; this is not a proof).\n", mate_target, res_depth);
+
+    char text[400], other[120] = "";
+    const Color stm = pos->to_move;
+    if (res_info && res_mate && res_mate_moves < 0)
+        snprintf(other, sizeof(other), " The search sees %s mating in %d instead.", stm == WHITE ? "Black" : "White",
+                 -res_mate_moves);
+    const double sec = mate_cap_ms / 1000.0;
+    if (mate_any && mate_capped)
+        snprintf(text, sizeof(text), "No mate found within %g s (depth %d searched; this is not a proof).%s "
+                 "'mate t 30' searches 30 s.", sec, res_depth, other);
+    else if (mate_any)
+        snprintf(text, sizeof(text), "No mate found (depth %d searched; this is not a proof).%s", res_depth, other);
+    else if (mate_capped)
+        snprintf(text, sizeof(text), "No mate in %d found within %g s (depth %d of %d searched; this is not a proof).%s "
+                 "'mate %d 30' searches 30 s.", mate_target, sec, res_depth, 2 * mate_target - 1, other, mate_target);
+    else
+        snprintf(text, sizeof(text), "No mate in %d found (depth %d searched; this is not a proof).%s", mate_target,
+                 res_depth, other);
+    print_wrapped(text, 0, NULL);
 }
 
-static void cmd_eval(Position* pos) {
+static void cmd_eval(Position* pos, const char* arg) {
+    char w[32];
+    const char* rest = split_word(arg, w, sizeof(w), false);
+    long ms = 0;
+    if (w[0] && (rest[0] || !parse_seconds(w, &ms))) {
+        printf("Usage: eval [S], S = seconds to search (0.1-3600; default as 'hint').\n");
+        return;
+    }
     history_check(pos);
     if (no_legal_moves(pos, "No evaluation: ")) return;
     bool network = false;
@@ -4867,10 +6139,16 @@ static void cmd_eval(Position* pos) {
     const int white = pos->to_move == WHITE ? v : -v;
     char score[24];
     format_eval(white, 0, score, sizeof(score));
-    printf("Static evaluation: ");
+    put_role(R_LABEL, "Static evaluation");
+    printf("%*s", LABEL_COL - (int)strlen("Static evaluation"), "");
     put_styled(eval_role(white, 0), score);
 
-    printf(" (White's view, %s).\n", network ? "neural network (NNUE)" : "classical evaluation");
+    printf(" (White's view, %s)\n", network ? "neural network (NNUE)" : "classical evaluation");
+    assist_count(pos, false);
+    assist_next = AS_EVAL;
+    hint_ms = ms;
+    if (ms > 0) printf("Chessenger searches %g s ('stop' ends it at once).\n", ms / 1000.0);
+    own_push(OWN_HINT);
 }
 
 static void cmd_network(void) {
@@ -4993,6 +6271,19 @@ static void ponder_echo(int i) {
 int console_line_in_search(const char* typed) {
     if (!con_on) return 0;
     if (search_kind == SK_ANALYZE) return 1;
+    if (search_kind == SK_GAME) {
+        char pw[16];
+        const char* prest = split_word(typed, pw, sizeof(pw), true);
+        if (strcmp(pw, "pause") == 0 && !prest[0] && game_on && !game_over) {
+            pause_req = true;
+            return 1;
+        }
+        if (strcmp(pw, "end") == 0 && !prest[0] && game_on && !game_over) {
+            end_req = true;
+            return 1;
+        }
+        return 0;
+    }
     if (search_kind != SK_PONDER || ponder_hit) return 0;
     char w[64];
     const char* rest = split_word(typed, w, sizeof(w), false);
@@ -5028,10 +6319,18 @@ int console_line_in_search(const char* typed) {
 void console_stop_in_search(void) {
     if (con_on && (search_kind == SK_ANNOTATE || search_kind == SK_WHY)) search_interrupted = true;
     if (con_on && search_kind == SK_GAME && game_auto) search_interrupted = true;
+
+    if (con_on && search_kind == SK_ANALYZE) search_interrupted = true;
 }
 
 bool console_interrupt_taken(void) {
     if (think_on) think_tick();
+
+    if (con_on && search_kind == SK_MATE && mate_cap_ms > 0 && !mate_capped &&
+        elapsed_ms(search_started) >= mate_cap_ms) {
+        mate_capped = true;
+        return true;
+    }
     if (!con_interrupt || !con_on || search_kind == SK_NONE) return false;
     con_interrupt = 0;
     search_interrupted = true;
@@ -5075,12 +6374,16 @@ static void ponder_done(Position* pos, bool interrupted) {
         hist_hash = pos->hash;
         redo_clear();
 
+        const bool echo_now = !ponder_echoed;
+        if (echo_now) screen_top();
         if (!ponder_echoed) ponder_echo(hist_count - 1);
         ponder_echoed = false;
         clock_after_move(game_human, used);
         if (game_check_end(pos)) return;
         search_started = ponder_hit_time;
+        top_held = echo_now;
         game_engine_done(pos, false);
+        top_held = false;
         return;
     }
     *pos = ponder_saved;
@@ -5363,16 +6666,39 @@ static void split_name_count(const char* arg, char* name, size_t n, long* count)
     }
 }
 
+static bool name_bad_last_word(const char* name, bool argv_name) {
+    const char* sp = strrchr(name, ' ');
+    if (!sp || sp == name || !sp[1]) return false;
+    FILE* f = open_named(name, "rb", argv_name);
+    if (f) {
+        fclose(f);
+        return false;
+    }
+    const char* w = sp + 1;
+    if (strspn(w, "+-.0123456789") == strlen(w) && strpbrk(w, "0123456789")) return true;
+    size_t k = (size_t)(sp - name);
+    while (k > 0 && (name[k - 1] == ' ' || name[k - 1] == '\t')) k--;
+    char head[MAX_UCI_LINE];
+    if (k == 0 || k >= sizeof(head)) return false;
+    snprintf(head, sizeof(head), "%.*s", (int)k, name);
+    f = open_named(head, "rb", argv_name);
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
 static int full_moves(int plies, bool black) {
     return (plies + (black ? 1 : 0) + 1) / 2;
 }
 
 static ConsoleAction cmd_load(Position* pos, const char* arg, char* line, size_t size) {
     history_check(pos);
-    char name[MAX_UCI_LINE];
+    char name[MAX_UCI_LINE], typed[MAX_UCI_LINE];
     long n = 1;
-    split_name_count(arg, name, sizeof(name), &n);
-    if (!name[0]) {
+    split_name_count(arg, typed, sizeof(typed), &n);
+    const char* expanded = expand_name(typed, name, sizeof(name));
+    if (expanded != name) snprintf(name, sizeof(name), "%s", expanded);
+    if (!name[0] || name_bad_last_word(name, false)) {
         printf("Usage: load FILE [N], N = the game in the file (default 1).\n");
         return CONSOLE_DONE;
     }
@@ -5395,15 +6721,18 @@ static ConsoleAction cmd_load(Position* pos, const char* arg, char* line, size_t
     const char* result = pgn_tag(&g, "Result");
     char text[MAX_UCI_LINE + 700];
     const int moves = full_moves(g.count, strstr(g.fen, " b ") != NULL);
-    snprintf(text, sizeof(text), "Loaded %s, game %ld: %s - %s, %d move%s (%s). Type 'next' to step through it.", name, n,
-             white && white[0] ? white : "?", black && black[0] ? black : "?", moves, moves == 1 ? "" : "s",
-             result && result[0] ? result : "*");
+    snprintf(text, sizeof(text), "Loaded %s, game %ld:", name, n);
     print_wrapped(text, 2, NULL);
+    snprintf(text, sizeof(text), "  %s - %s, %d move%s (%s)", white && white[0] ? white : "?",
+             black && black[0] ? black : "?", moves, moves == 1 ? "" : "s", result && result[0] ? result : "*");
+    print_wrapped(text, 4, NULL);
+    printf("Type 'next' to step through it.\n");
     if (g.stop[0]) print_wrapped(g.stop, 2, NULL);
     snprintf(line, size, "position fen %s", g.fen);
     pgn_free(&g);
     sync_kind = SYNC_RESET;
     capture_begin();
+    load_to_move = true;
     own_push(OWN_SHOW);
     return CONSOLE_PASS;
 }
@@ -5424,9 +6753,13 @@ static void nav_show(Position* pos) {
 static ConsoleAction cmd_nav(Position* pos, CommandId id, const char* arg, char* line, size_t size) {
     history_check(pos);
     if (game_on && !game_over) {
+
         printf("Not during a game: 'undo' and 'redo' take moves back and replay them.\n");
+        print_wrapped("After the game (also after 'resign'): 'first' (before move 1), 'prev', 'next', 'goto M', 'last'.",
+                      0, NULL);
         return CONSOLE_DONE;
     }
+    if (game_on && game_over) redo_clear();
     const int total = hist_count + redo_count;
     long target = hist_count;
     char w[32];
@@ -5478,6 +6811,7 @@ static ConsoleAction cmd_nav(Position* pos, CommandId id, const char* arg, char*
         game_viewed_time = game_time_end;
     }
     game_on = game_over = game_time_end = draw_offer = false;
+    screen_top();
     if (target == hist_count) {
         nav_show(pos);
         return CONSOLE_DONE;
@@ -5520,7 +6854,206 @@ static ConsoleAction cmd_nav(Position* pos, CommandId id, const char* arg, char*
     return CONSOLE_PASS;
 }
 
-#define ANNOTATE_SCALE 1.0
+static bool replay_stopped = false;
+
+#if defined(_WIN32) && !defined(__wasi__)
+
+static bool replay_input_waits(void) {
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    if (h == NULL || h == INVALID_HANDLE_VALUE) return false;
+    if (GetConsoleMode(h, &mode)) {
+        INPUT_RECORD rec[64];
+        DWORD n = 0;
+        if (!GetNumberOfConsoleInputEvents(h, &n) || n == 0) return false;
+        if (!PeekConsoleInputW(h, rec, n < 64 ? n : 64, &n)) return false;
+        for (DWORD i = 0; i < n; i++)
+            if (rec[i].EventType == KEY_EVENT && rec[i].Event.KeyEvent.bKeyDown &&
+                (rec[i].Event.KeyEvent.wVirtualKeyCode == VK_RETURN || rec[i].Event.KeyEvent.uChar.UnicodeChar == L'\r'))
+                return true;
+        return false;
+    }
+    const DWORD type = GetFileType(h);
+    if (type == FILE_TYPE_PIPE) {
+        DWORD avail = 0;
+        return PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) && win_stdin_ready();
+    }
+    if (type == FILE_TYPE_DISK) {
+        LARGE_INTEGER size, at, zero;
+        zero.QuadPart = 0;
+        return GetFileSizeEx(h, &size) && SetFilePointerEx(h, zero, &at, FILE_CURRENT) && size.QuadPart > at.QuadPart;
+    }
+    return false;
+}
+#endif
+
+static int replay_wait(long ms) {
+    if (ms <= 0) return 0;
+#if defined(__wasi__)
+    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+    return 0;
+#elif defined(_WIN32)
+
+    for (long left = ms; ; left -= 100) {
+        if (con_interrupt) {
+            con_interrupt = 0;
+            return 1;
+        }
+        char q[8];
+        if (console_queued_line(q, sizeof(q))) return 2;
+        if (replay_input_waits()) return 2;
+        if (left <= 0) return 0;
+        Sleep((DWORD)(left < 100 ? left : 100));
+    }
+#else
+    const struct timeval t0 = get_wall_time();
+    for (;;) {
+        if (con_interrupt) {
+            con_interrupt = 0;
+            return 1;
+        }
+        char q[8];
+        if (console_queued_line(q, sizeof(q))) return 2;
+        const long long left = ms - time_diff_ms(t0, get_wall_time());
+        if (left <= 0) return 0;
+        const int step = left < 100 ? (int)left : 100;
+        struct pollfd p;
+        p.fd = STDIN_FILENO;
+        p.events = POLLIN;
+        p.revents = 0;
+        if (poll(&p, 1, step) > 0) {
+            int n = 0;
+            if (ioctl(STDIN_FILENO, FIONREAD, &n) == 0 && n > 0) return 2;
+            struct timespec ts = { 0, (long)step * 1000000L };
+            nanosleep(&ts, NULL);
+        }
+    }
+#endif
+}
+
+static void cmd_replay(Position* pos, const char* arg) {
+    history_check(pos);
+    bool flipped = con_flipped, side_set = false, time_set = false, bad = false;
+    long ms = 2000;
+    const char* s = arg;
+    for (;;) {
+        char w[32];
+        s = split_word(s, w, sizeof(w), true);
+        if (!w[0]) break;
+        if (!side_set && (strcmp(w, "white") == 0 || strcmp(w, "black") == 0)) {
+            flipped = strcmp(w, "black") == 0;
+            side_set = true;
+            continue;
+        }
+        char* end = NULL;
+        const double sec = strtod(w, &end);
+        if (time_set || !end || end == w || *end != '\0' || strspn(w, "0123456789.") != strlen(w) || sec < 0 ||
+            sec > 3600) {
+            bad = true;
+            break;
+        }
+        ms = (long)(sec * 1000.0 + 0.5);
+        time_set = true;
+    }
+    if (bad) {
+        printf("Usage: replay [white|black] [S], S = seconds between moves (0-3600; default 2).\n");
+        return;
+    }
+    if (game_on && !game_over) {
+        printf("Not during a game: 'end' stops it (or 'resign'), then 'replay'.\n");
+        return;
+    }
+    const int total = hist_count + redo_count;
+    if (total == 0) {
+        printf("No moves to replay.\n");
+        return;
+    }
+    HistoryEntry* seq = (HistoryEntry*)malloc((size_t)total * sizeof(HistoryEntry));
+    if (!seq) {
+        printf("Not enough memory to replay.\n");
+        return;
+    }
+    for (int i = 0; i < hist_count; i++) seq[i] = hist[i];
+    for (int i = 0; i < redo_count; i++) seq[hist_count + i] = redo_stack[redo_count - 1 - i];
+    Position tmp;
+    if (!parse_fen(&tmp, hist_base_fen)) {
+        printf("No replay: the start position of the game is invalid.\n");
+        free(seq);
+        return;
+    }
+    char head[160];
+    if (ms > 0)
+        snprintf(head, sizeof(head), "Replay: %d half-move%s from %s's side, %g s apart.%s", total, total == 1 ? "" : "s",
+                 flipped ? "Black" : "White", ms / 1000.0,
+#ifdef __wasi__
+                 ""
+#else
+                 " Type 'stop' or press Ctrl+C to end it."
+#endif
+                 );
+    else
+        snprintf(head, sizeof(head), "Replay: %d half-move%s from %s's side.", total, total == 1 ? "" : "s",
+                 flipped ? "Black" : "White");
+    print_wrapped(head, 0, NULL);
+
+    HistoryEntry* const saved_hist = hist;
+    const int saved_count = hist_count;
+    const uint64_t saved_hash = hist_hash;
+    const bool saved_game_on = game_on, saved_flipped = con_flipped;
+    if (ms > 0) echo_off_begin();
+    int shown = 0, stopped = 0;
+    for (int k = 0; k <= total; k++) {
+        if (k > 0) {
+            Move m;
+            if (!legal_match(&tmp, &seq[k - 1].move, &m)) {
+                printf("Cannot replay '%s' in this position.\n", seq[k - 1].san);
+                break;
+            }
+            play_on_position(&tmp, &m);
+        }
+        hist = seq;
+        hist_count = k;
+        hist_hash = tmp.hash;
+        game_on = false;
+        con_flipped = flipped;
+        if (k == 0) printf("\nAt the start (0 of %d half-moves).\n", total);
+        else {
+            char label[16];
+            bool black;
+            history_label(k - 1, label, sizeof(label), &black);
+            printf("\nAfter %s %s (%d of %d half-moves).\n", label, seq[k - 1].san, k, total);
+        }
+        print_board(&tmp);
+        hist = saved_hist;
+        hist_count = saved_count;
+        hist_hash = saved_hash;
+        game_on = saved_game_on;
+        con_flipped = saved_flipped;
+        shown = k;
+        fflush(stdout);
+        if (k < total && (stopped = replay_wait(ms)) != 0) break;
+    }
+    if (ms > 0) echo_off_end();
+    if (stopped) {
+        char label[16], text[160];
+        bool black;
+        if (shown > 0) {
+            history_label(shown - 1, label, sizeof(label), &black);
+            snprintf(text, sizeof(text), "Replay stopped after %s %s (%d of %d half-moves). The board is as before.",
+                     label, seq[shown - 1].san, shown, total);
+        } else {
+            snprintf(text, sizeof(text), "Replay stopped at the start. The board is as before.");
+        }
+        print_wrapped(text, 0, NULL);
+        replay_stopped = stopped == 2;
+    } else if (shown == total) {
+        printf("\nEnd of the replay. The board is as before.\n");
+    }
+    free(seq);
+    fflush(stdout);
+}
+
 #define ANNOTATE_MATE 10000
 
 typedef struct {
@@ -5532,27 +7065,50 @@ typedef struct {
     int phase;
     int at;
     int next;
+    int first;
     int base_full;
     bool base_black;
     int* cp;
+    double* wc;
+    double* wc_moved;
     int* mate;
     bool* known;
     char (*best)[24];
     Move* best_move;
     int* mark;
-    int marks[2][3];
+    int marks[2][6];
+
+    int* cp2;
+    int* mate2;
+    double* wc2;
+    int* bal;
+    int (*reply)[3];
+
+    bool* takes;
     long loss[2];
     int judged[2];
+
+    bool all;
+    bool judge[2];
+    char who[2][16];
+    int through;
+    bool every;
+    bool fen_sent;
+    bool gap;
+    bool in_book;
 } Annotation;
 static Annotation ann;
 static char restore_buf[MAX_UCI_LINE];
 
-static double win_chance(int cp) {
-    return 2.0 / (1.0 + exp(-0.00368208 * (double)cp * ANNOTATE_SCALE)) - 1.0;
-}
-
 static void ann_free(void) {
     free(ann.cp); free(ann.mate); free(ann.known); free(ann.best); free(ann.best_move); free(ann.mark);
+    free(ann.wc); free(ann.wc_moved);
+    ann.wc = ann.wc_moved = NULL;
+    free(ann.cp2); free(ann.mate2); free(ann.wc2); free(ann.bal); free(ann.reply); free(ann.takes);
+    ann.cp2 = ann.mate2 = ann.bal = NULL;
+    ann.wc2 = NULL;
+    ann.reply = NULL;
+    ann.takes = NULL;
     ann.cp = ann.mate = ann.mark = NULL;
     ann.known = NULL;
     ann.best = NULL;
@@ -5568,14 +7124,83 @@ static void ann_score(int i, char* buf, size_t n) {
     else format_eval(s * ann.cp[i], 0, buf, n);
 }
 
+static void ann_score2(int i, char* buf, size_t n) {
+    const bool white = ((i + (ann.base_black ? 1 : 0)) % 2) == 0;
+    const int s = white ? 1 : -1;
+    if (ann.mate2[i] != 0) format_eval(0, s * ann.mate2[i], buf, n);
+    else format_eval(s * ann.cp2[i], 0, buf, n);
+}
+
+static void ann_good_note(int j, char* buf, size_t n) {
+    if (ann.mark[j] == 4) {
+        char s2[24];
+        ann_score2(j, s2, sizeof(s2));
+        snprintf(buf, n, "next best: %s", s2);
+    } else {
+        const int* r = ann.reply[j + 1];
+        snprintf(buf, n, "sacrifice: material %+d -> %+d", ann.bal[j], r[r[0]]);
+    }
+}
+
 static void ann_label(int j, char* buf, size_t n, bool* black) {
     const int ply = j + (ann.base_black ? 1 : 0);
     *black = (ply % 2) == 1;
     snprintf(buf, n, *black ? "%d..." : "%d.", ann.base_full + ply / 2);
 }
 
+static bool ann_best_played(int j) {
+    const Move* played = &ann.g.moves[j].move;
+    return ann.best[j][0] && ann.best_move[j].from == played->from && ann.best_move[j].to == played->to &&
+           ann.best_move[j].promotion == played->promotion;
+}
+
+static void ann_score_every(int i, char* buf, size_t n) {
+    if (ann.mate[i] == 0 && ann.cp[i] == -ANNOTATE_MATE) snprintf(buf, n, "mate");
+    else ann_score(i, buf, n);
+}
+
+#define ANN_HEAD 16
+static void ann_head(int j, const char* glyph, char* buf, size_t n, bool* black) {
+    char label[16];
+    ann_label(j, label, sizeof(label), black);
+    snprintf(buf, n, *black ? "%6s %s%s" : "%4s %s%s", label, ann.g.moves[j].san, glyph);
+}
+
+static void ann_open(bool book) {
+    if (ann.gap || (ann.in_book && !book)) printf("\n");
+    ann.gap = false;
+    ann.in_book = book;
+}
+
+static void ann_row(const char* head, const char* sb, const char* sa, const char* who, const char* tail) {
+    if (tail && tail[0]) printf("%-*s %7s -> %-7s  %-10s  %s\n", ANN_HEAD, head, sb, sa, who, tail);
+    else printf("%-*s %7s -> %-7s  %s\n", ANN_HEAD, head, sb, sa, who);
+}
+
+static void ann_every_line(int j, bool known, bool book) {
+    bool black;
+    char head[48];
+    ann_head(j, "", head, sizeof(head), &black);
+    ann_open(book && known);
+    if (!known) {
+        printf("%-*s no score\n", ANN_HEAD, head);
+        return;
+    }
+    char sb[24], sa[24], tail[64] = "";
+    ann_score(j, sb, sizeof(sb));
+    ann_score_every(j + 1, sa, sizeof(sa));
+    if (book) snprintf(tail, sizeof(tail), "book");
+    else if (!ann_best_played(j) && ann.best[j][0]) snprintf(tail, sizeof(tail), "best: %-14s %7s", ann.best[j], sb);
+    ann_row(head, sb, sa, ann.who[black ? 1 : 0], tail);
+}
+
 static void ann_judge(int j) {
-    if (!ann.known[j] || !ann.known[j + 1]) return;
+
+    if (ann.every || j >= ann.first) ann.through++;
+    if (!ann.known[j] || !ann.known[j + 1]) {
+        if (ann.every) ann_every_line(j, false, false);
+        return;
+    }
     bool black;
     char label[16];
     ann_label(j, label, sizeof(label), &black);
@@ -5584,23 +7209,50 @@ static void ann_judge(int j) {
     const Move* played = &ann.g.moves[j].move;
     const bool best = ann.best[j][0] && ann.best_move[j].from == played->from && ann.best_move[j].to == played->to &&
                       ann.best_move[j].promotion == played->promotion;
-    const double drop = win_chance(before) - win_chance(after);
+    const double drop = ann.wc[j] - ann.wc_moved[j + 1];
+    if (!ann.judge[side]) return;
+    if (ann.every && j < ann.first) {
+        ann_every_line(j, true, true);
+        return;
+    }
     int mark = 0;
     if (!best) mark = drop >= 0.3 ? 3 : drop >= 0.2 ? 2 : drop >= 0.1 ? 1 : 0;
+
+    const int* reply = ann.reply[j + 1];
+    bool sac = reply[0] > 0;
+    for (int k = 1; k <= reply[0]; k++)
+        if (reply[k] > ann.bal[j] - 2) sac = false;
+    const bool open = fabs(ann.wc[j]) < 0.8;
+    const bool two = ann.wc2[j] <= 1.0;
+    const int mate_before = ann.mate[j], mate_after = -ann.mate[j + 1];
+    const bool mates_now = ann.cp[j + 1] == -ANNOTATE_MATE && ann.mate[j + 1] == 0;
+    const bool recapture = j > 0 && ann.takes[j - 1] && played->to == ann.g.moves[j - 1].move.to;
+    if (!mark) {
+        if (sac && best && mate_before > 0 && two && ann.mate2[j] <= 0) mark = 5;
+        else if (sac && drop < 0.05 && open) mark = (best || drop <= 0.02) ? 5 : 6;
+        else if (best && two && ann.wc[j] - ann.wc2[j] >= 0.2 && open && !recapture) mark = 4;
+    }
+    if (!best && mate_before >= 0 && mate_after < 0) mark = 3;
+    else if (!best && mate_before > 0 && mate_after <= 0 && !mates_now && !mark) mark = 1;
     const int b = before > 1000 ? 1000 : before < -1000 ? -1000 : before;
     const int a = after > 1000 ? 1000 : after < -1000 ? -1000 : after;
     ann.loss[side] += (best || b <= a) ? 0 : b - a;
     ann.judged[side]++;
     ann.mark[j] = mark;
-    if (!mark) return;
+    if (!mark) {
+        if (ann.every) ann_every_line(j, true, false);
+        return;
+    }
     ann.marks[side][mark - 1]++;
-    static const char* const GLYPH[4] = { "", "?!", "?", "??" };
-    char head[48], sb[24], sa[24], better[40];
-    snprintf(head, sizeof(head), black ? "%6s %s%s" : "%4s %s%s", label, ann.g.moves[j].san, GLYPH[mark]);
+    static const char* const GLYPH[7] = { "", "?!", "?", "??", "!", "!!", "!?" };
+    char head[48], sb[24], sa[24], tail[96];
+    ann_head(j, GLYPH[mark], head, sizeof(head), &black);
     ann_score(j, sb, sizeof(sb));
     ann_score(j + 1, sa, sizeof(sa));
-    snprintf(better, sizeof(better), "%s", ann.best[j]);
-    printf("%-15s %6s -> %-6s (White)   better: %-11s %s\n", head, sb, sa, better, sb);
+    ann_open(false);
+    if (mark >= 4) ann_good_note(j, tail, sizeof(tail));
+    else snprintf(tail, sizeof(tail), "better: %-14s %7s", ann.best[j], sb);
+    ann_row(head, sb, sa, ann.who[side], tail);
 }
 
 static void ann_write(void) {
@@ -5639,12 +7291,26 @@ static void ann_write(void) {
         pgn_token(&o, token);
         after_comment = false;
         if (ann.mark[j]) {
-            static const char* const NAG[4] = { "", "$6", "$2", "$4" };
-            char sb[24], sa[24], comment[96];
+            static const char* const NAG[7] = { "", "$6", "$2", "$4", "$1", "$3", "$5" };
+            char sb[24], sa[24], comment[128];
             pgn_token(&o, NAG[ann.mark[j]]);
             ann_score(j, sb, sizeof(sb));
             ann_score(j + 1, sa, sizeof(sa));
-            snprintf(comment, sizeof(comment), "{%s -> %s; better %s %s}", sb, sa, ann.best[j], sb);
+            if (ann.mark[j] >= 4) {
+                char note[64];
+                ann_good_note(j, note, sizeof(note));
+                snprintf(comment, sizeof(comment), "{%s -> %s; %s}", sb, sa, note);
+            } else
+                snprintf(comment, sizeof(comment), "{%s -> %s; better %s %s}", sb, sa, ann.best[j], sb);
+            pgn_token(&o, comment);
+            after_comment = true;
+        } else if (ann.every && ann.known[j] && ann.known[j + 1]) {
+            char sb[24], sa[24], comment[128];
+            ann_score(j, sb, sizeof(sb));
+            ann_score_every(j + 1, sa, sizeof(sa));
+            if (j < ann.first) snprintf(comment, sizeof(comment), "{%s; book}", sa);
+            else if (ann_best_played(j) || !ann.best[j][0]) snprintf(comment, sizeof(comment), "{%s}", sa);
+            else snprintf(comment, sizeof(comment), "{%s; best %s %s}", sa, ann.best[j], sb);
             pgn_token(&o, comment);
             after_comment = true;
         }
@@ -5662,20 +7328,48 @@ static void ann_write(void) {
     char text[MAX_UCI_LINE + 64];
     snprintf(text, sizeof(text), "Saved: %s (game %d).", ann.out, games + 1);
     print_wrapped(text, 2, NULL);
+    print_saved_path(ann.out);
 }
 
 static void ann_finish(bool stopped) {
-    const int done = ann.judged[0] + ann.judged[1];
-    if (stopped) printf("Stopped: %d of %d half-moves annotated.\n", done, ann.g.count);
-    for (int side = 0; side < 2; side++) {
-        const long avg = ann.judged[side] ? (ann.loss[side] + ann.judged[side] / 2) / ann.judged[side] : 0;
-        printf("Summary  %s: %d ?!  %d ?  %d ??   average loss %ld cp\n", side == 0 ? "White" : "Black",
-               ann.marks[side][0], ann.marks[side][1], ann.marks[side][2], avg);
+
+    if (stopped || ann.first < ann.g.count || ann.every) printf("\n");
+    if (stopped) printf("Stopped: %d of %d half-moves annotated.\n", ann.through,
+                        ann.every ? ann.g.count : ann.g.count - ann.first);
+    else if (ann.first < ann.g.count || ann.every) {
+        char label[16], text[96];
+        bool black;
+        ann_label(ann.g.count - 1, label, sizeof(label), &black);
+        snprintf(text, sizeof(text), "Gone through to the end: %d half-moves, the last %s %s.", ann.through, label,
+                 ann.g.moves[ann.g.count - 1].san);
+        print_wrapped(text, 2, NULL);
     }
+
+    printf("\n");
+    for (int side = 0; side < 2; side++) {
+        const char* color = side == 0 ? "White" : "Black";
+        const char* name = pgn_tag(&ann.g, color);
+        char head[96], text[200];
+        if (name && name[0] && strcmp(name, "?") != 0) snprintf(head, sizeof(head), "%.60s (%s)", name, color);
+        else snprintf(head, sizeof(head), "%s", color);
+        if (!ann.judge[side]) {
+            snprintf(text, sizeof(text), "Summary  %s: not judged; 'annotate ... all' judges both sides.", head);
+            print_wrapped(text, 2, NULL);
+            continue;
+        }
+        const long avg = ann.judged[side] ? (ann.loss[side] + ann.judged[side] / 2) / ann.judged[side] : 0;
+        snprintf(text, sizeof(text), "Summary  %s: %d ?!  %d ?  %d ??   %d !  %d !!  %d !?", head,
+                 ann.marks[side][0], ann.marks[side][1], ann.marks[side][2], ann.marks[side][3], ann.marks[side][4],
+                 ann.marks[side][5]);
+        print_wrapped(text, 2, NULL);
+        printf("  average loss %ld cp\n", avg);
+    }
+    printf("\n");
     ann_write();
     const bool quit = ann.from_argv;
     ann_free();
     own_count = 0;
+    own_push(OWN_LINES);
     own_push(OWN_RESTORE);
     if (quit) own_push(OWN_QUIT);
 }
@@ -5689,10 +7383,32 @@ static bool restore_line(char* line, size_t size) {
     return true;
 }
 
+static int ann_book_moves(Position* p) {
+    if (uci_chess960) return 0;
+    int k = 0;
+    for (; k < ann.g.count; k++) {
+        const int at = book_lookup(p);
+        if (at < 0) break;
+        const Move* m = &ann.g.moves[k].move;
+        int j = book_pos[at].first;
+        while (j >= 0 && !(book_moves[j].move.from == m->from && book_moves[j].move.to == m->to &&
+                           book_moves[j].move.promotion == m->promotion))
+            j = book_moves[j].next;
+        Move played = *m;
+        if (j < 0) {
+            Position after = *p;
+            play_on_position(&after, &played);
+            if (book_lookup(&after) < 0) break;
+        }
+        play_on_position(p, &played);
+    }
+    return k;
+}
+
 static void cmd_annotate(Position* pos, const char* arg, bool from_argv) {
     history_check(pos);
     if (game_on && !game_over) {
-        printf("Not during a game: finish it ('resign'), then 'annotate'.\n");
+        printf("Not during a game: 'end' stops it (or 'resign'), then 'annotate'.\n");
         if (from_argv) own_push(OWN_QUIT);
         return;
     }
@@ -5702,6 +7418,20 @@ static void cmd_annotate(Position* pos, const char* arg, bool from_argv) {
     size_t len = strlen(buf);
     while (len > 0 && (buf[len - 1] == ' ' || buf[len - 1] == '\t')) buf[--len] = '\0';
     snprintf(ann.go, sizeof(ann.go), "go movetime 1000");
+
+    ann.all = false;
+    ann.every = false;
+    for (int k = 0; k < 2; k++) {
+        char* lw = strrchr(buf, ' ');
+        char* w = lw ? lw + 1 : buf;
+        if (strcasecmp(w, "all") == 0 && !ann.all) ann.all = true;
+        else if (strcasecmp(w, "every") == 0 && !ann.every) ann.every = true;
+        else break;
+        if (lw) *lw = '\0'; else buf[0] = '\0';
+        len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == ' ' || buf[len - 1] == '\t')) buf[--len] = '\0';
+    }
+    if (ann.every) ann.all = true;
     char* last = strrchr(buf, ' ');
     char* word = last ? last + 1 : buf;
     long v = 0;
@@ -5737,8 +7467,9 @@ static void cmd_annotate(Position* pos, const char* arg, bool from_argv) {
     }
     len = strlen(buf);
     while (len > 0 && (buf[len - 1] == ' ' || buf[len - 1] == '\t')) buf[--len] = '\0';
-    if (bad) {
-        printf("Usage: annotate [FILE] [S], S = seconds a move (0.1-3600, default 1), or 'depth N'.\n");
+    if (bad || (buf[0] && name_bad_last_word(buf, from_argv))) {
+        printf("Usage: annotate [FILE] [S] [all|every], or annotate [FILE] depth N [all|every],\n"
+               "S = seconds a move (0.1-3600, default 1).\n");
         if (from_argv) own_push(OWN_QUIT);
         return;
     }
@@ -5750,7 +7481,9 @@ static void cmd_annotate(Position* pos, const char* arg, bool from_argv) {
     if (rl >= sizeof(restore_buf)) snprintf(restore_buf, sizeof(restore_buf), "position fen %s", position_to_fen(pos));
     memset(&ann.g, 0, sizeof(ann.g));
     if (buf[0]) {
-        char err[MAX_UCI_LINE + 128];
+        char err[MAX_UCI_LINE + 128], typed[MAX_UCI_LINE];
+        snprintf(typed, sizeof(typed), "%s", buf);
+        snprintf(buf, sizeof(buf), "%s", expand_name(typed, err, sizeof(buf)));
         if (!pgn_read(buf, 1, &ann.g, err, sizeof(err), from_argv)) {
             print_wrapped(err, 2, NULL);
             restore_buf[0] = '\0';
@@ -5830,7 +7563,16 @@ static void cmd_annotate(Position* pos, const char* arg, bool from_argv) {
     ann.known = (bool*)calloc((size_t)n, sizeof(bool));
     ann.best = calloc((size_t)n, sizeof(*ann.best));
     ann.best_move = (Move*)calloc((size_t)n, sizeof(Move));
-    if (!ann.cp || !ann.mate || !ann.mark || !ann.known || !ann.best || !ann.best_move) {
+    ann.wc = (double*)calloc((size_t)n, sizeof(double));
+    ann.wc_moved = (double*)calloc((size_t)n, sizeof(double));
+    ann.cp2 = (int*)calloc((size_t)n, sizeof(int));
+    ann.mate2 = (int*)calloc((size_t)n, sizeof(int));
+    ann.wc2 = (double*)calloc((size_t)n, sizeof(double));
+    ann.bal = (int*)calloc((size_t)n, sizeof(int));
+    ann.reply = calloc((size_t)n, sizeof(*ann.reply));
+    ann.takes = (bool*)calloc((size_t)n, sizeof(bool));
+    if (!ann.cp || !ann.mate || !ann.mark || !ann.known || !ann.best || !ann.best_move || !ann.wc || !ann.wc_moved ||
+        !ann.cp2 || !ann.mate2 || !ann.wc2 || !ann.bal || !ann.reply || !ann.takes) {
         ann_free();
         printf("Not enough memory to annotate.\n");
         restore_buf[0] = '\0';
@@ -5843,19 +7585,69 @@ static void cmd_annotate(Position* pos, const char* arg, bool from_argv) {
     memset(ann.marks, 0, sizeof(ann.marks));
     ann.loss[0] = ann.loss[1] = 0;
     ann.judged[0] = ann.judged[1] = 0;
+    ann.through = 0;
+    ann.fen_sent = false;
+    ann.gap = ann.in_book = false;
     ann.phase = 0;
     ann.at = 0;
-    ann.next = 0;
+    own_lines = multipv_setting;
+
+    ann.first = ann_book_moves(&base);
+    ann.next = ann.first < ann.g.count ? ann.first : ann.g.count + 1;
+    if (ann.every) ann.next = 0;
     ann.from_argv = from_argv;
     ann.on = true;
     const char* white = pgn_tag(&ann.g, "White");
     const char* black = pgn_tag(&ann.g, "Black");
+
+    const bool eng_w = white && strncasecmp(white, "Chessenger", 10) == 0;
+    const bool eng_b = black && strncasecmp(black, "Chessenger", 10) == 0;
+    const bool versus = eng_w != eng_b;
+    snprintf(ann.who[0], sizeof(ann.who[0]), "%s", versus ? (eng_w ? "Chessenger" : "you") : "White");
+    snprintf(ann.who[1], sizeof(ann.who[1]), "%s", versus ? (eng_b ? "Chessenger" : "you") : "Black");
+    ann.judge[0] = ann.all || !versus || !eng_w;
+    ann.judge[1] = ann.all || !versus || !eng_b;
     char text[MAX_UCI_LINE + 700];
     const int moves = full_moves(ann.g.count, ann.base_black);
-    snprintf(text, sizeof(text), "Annotating %s: %s - %s, %d move%s, %s.", ann.title, white && white[0] ? white : "?",
-             black && black[0] ? black : "?", moves, moves == 1 ? "" : "s", per);
+    snprintf(text, sizeof(text), "Annotating %s: %s - %s, %d move%s, %s.", ann.title,
+             white && white[0] ? white : "?", black && black[0] ? black : "?", moves, moves == 1 ? "" : "s", per);
     print_wrapped(text, 2, NULL);
+    printf("Scores from White's view.\n");
+    if (versus && !ann.all) {
+        snprintf(text, sizeof(text), "Your moves (%s) only; 'annotate ... all' judges Chessenger's too.",
+                 eng_w ? "Black" : "White");
+        print_wrapped(text, 2, NULL);
+    }
+    if (ann.every)
+        print_wrapped("Every move: its scores before -> after, the best move when another; both sides judged.", 2, NULL);
     if (ann.g.stop[0]) print_wrapped(ann.g.stop, 2, NULL);
+    ann.gap = true;
+    if (ann.first > 0) {
+        printf("\n");
+        char from[16], to[16], span[96];
+        bool black;
+        ann_label(0, from, sizeof(from), &black);
+        ann_label(ann.first - 1, to, sizeof(to), &black);
+        if (ann.first == 1) snprintf(span, sizeof(span), "%s %s", from, ann.g.moves[0].san);
+        else snprintf(span, sizeof(span), "%s %s to %s %s", from, ann.g.moves[0].san, to,
+                      ann.g.moves[ann.first - 1].san);
+        if (ann.every)
+            snprintf(text, sizeof(text), "Book: %s%s (%d half-move%s): scores shown, not judged.",
+                     ann.first < ann.g.count ? "" : "the whole game, ", span, ann.first, ann.first == 1 ? "" : "s");
+        else if (ann.first < ann.g.count)
+            snprintf(text, sizeof(text), "Book: %s (%d half-move%s), not annotated.", span, ann.first,
+                     ann.first == 1 ? "" : "s");
+        else
+            snprintf(text, sizeof(text), "Book: the whole game, %s (%d half-move%s); nothing to annotate.", span,
+                     ann.first, ann.first == 1 ? "" : "s");
+        print_wrapped(text, 2, NULL);
+
+        for (int j = 0; !ann.every && j < ann.first; j++) {
+            char head[48];
+            ann_head(j, "", head, sizeof(head), &black);
+            printf("%-*s book\n", ANN_HEAD, head);
+        }
+    }
     game_view_keep();
     game_on = game_over = false;
     own_push(OWN_ANNOTATE);
@@ -5865,6 +7657,13 @@ static bool annotate_step(Position* pos, char* line, size_t size) {
     if (!ann.on) return false;
     if (ann.phase == 0) {
         ann.phase = 1;
+        snprintf(line, size, "setoption name MultiPV value 2");
+        cap_quiet = capture_begin();
+        own_push(OWN_ANNOTATE);
+        return true;
+    }
+    if (ann.phase == 1) {
+        ann.phase = 2;
         snprintf(line, size, "position fen %s", ann.g.fen);
         own_push(OWN_ANNOTATE);
         return true;
@@ -5877,21 +7676,65 @@ static bool annotate_step(Position* pos, char* line, size_t size) {
         }
         while (ann.at < i) {
             Move m = ann.g.moves[ann.at].move;
+            int c, t;
+            ann.takes[ann.at] = piece_at(pos, m.to, &c, &t);
             play_on_position(pos, &m);
             ann.at++;
         }
         Move list[MAX_MOVES];
         if (generate_legal_moves(pos, list) == 0) {
             const bool mate = is_in_check(pos, pos->to_move);
+            ann.fen_sent = false;
             ann.known[i] = true;
             ann.cp[i] = mate ? -ANNOTATE_MATE : 0;
+            ann.wc[i] = mate ? -1.0 : 0.0;
+            ann.wc_moved[i] = -ann.wc[i];
             ann.mate[i] = 0;
             ann.best[i][0] = '\0';
+            ann.wc2[i] = 2.0;
+            ann.mate2[i] = ann.cp2[i] = 0;
+            ann.reply[i][0] = 0;
+            ann.bal[i] = (pos->to_move == WHITE ? 1 : -1) * material_balance(pos);
             if (i > 0) ann_judge(i - 1);
             ann.next++;
             continue;
         }
+
+        if (!ann.fen_sent) {
+            ann.fen_sent = true;
+            snprintf(line, size, "position fen %s", position_to_fen(pos));
+            own_push(OWN_ANNOTATE);
+            return true;
+        }
+        ann.fen_sent = false;
         return search_line(pos, SK_ANNOTATE, line, size, ann.go);
+    }
+}
+
+static void ann_lines(Position* pos, int i) {
+    const int view = pos->to_move == WHITE ? 1 : -1;
+    ann.bal[i] = view * material_balance(pos);
+    ann.wc2[i] = 2.0;
+    ann.mate2[i] = ann.cp2[i] = 0;
+    if (res2_info) {
+        ann.mate2[i] = res2_mate ? res2_mate_moves : 0;
+        ann.cp2[i] = res2_mate ? (res2_mate_moves > 0 ? ANNOTATE_MATE : -ANNOTATE_MATE) : res2_cp;
+        ann.wc2[i] = res2_mate ? (res2_mate_moves > 0 ? 1.0 : -1.0) : console_wdl_chance(res2_cp, pos);
+    }
+    ann.reply[i][0] = 0;
+    Position p = *pos;
+    const char* s = res_pv;
+    for (int k = 0; k < 3; k++) {
+        char tok[16];
+        s = split_word(s, tok, sizeof(tok), false);
+        Move m;
+        if (!tok[0] || parse_move_human(&p, tok, &m) != SAN_OK) break;
+        if (k == 0) {
+            int c, t;
+            if (!piece_at(&p, m.to, &c, &t) || c == (int)p.to_move) break;
+        }
+        play_on_position(&p, &m);
+        if (k != 1) ann.reply[i][++ann.reply[i][0]] = -view * material_balance(&p);
     }
 }
 
@@ -5906,11 +7749,15 @@ static void annotate_result(Position* pos, bool interrupted) {
     ann.known[i] = res_info;
     ann.mate[i] = res_mate ? res_mate_moves : 0;
     ann.cp[i] = res_mate ? (res_mate_moves > 0 ? ANNOTATE_MATE : -ANNOTATE_MATE) : res_cp;
+
+    ann.wc[i] = res_mate ? (res_mate_moves > 0 ? 1.0 : -1.0) : console_wdl_chance(res_cp, pos);
+    ann.wc_moved[i] = res_mate ? -ann.wc[i] : console_wdl_chance(-res_cp, pos);
     ann.best[i][0] = '\0';
     if (res_move_ok && legal_match(pos, &res_move, &m)) {
         ann.best_move[i] = m;
         numbered_san(pos, &m, ann.best[i], sizeof(ann.best[i]));
     }
+    ann_lines(pos, i);
     if (i > 0) ann_judge(i - 1);
     ann.next++;
     own_push(OWN_ANNOTATE);
@@ -6758,7 +8605,7 @@ static ConsoleAction cmd_bench(Position* pos, const char* arg, char* line, size_
     }
     if (extra_text(rest, "bench", "bench [DEPTH]")) return CONSOLE_DONE;
     if (game_on && !game_over) {
-        printf("Not during a game: 'bench' clears the hash table ('stop' or 'resign' first).\n");
+        printf("Not during a game: 'bench' clears the hash table ('stop' or 'end' first).\n");
         return CONSOLE_DONE;
     }
     const long mb = hash_mb_now();
@@ -6791,7 +8638,8 @@ static void console_enter_mode(Position* pos, bool greet) {
     con_prompt = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
     static bool pieces_default = false;
     if (!pieces_default) {
-        con_pieces = isatty(STDOUT_FILENO) ? PC_SHAPES : PC_ASCII;
+
+        con_pieces = isatty(STDOUT_FILENO) ? PC_UNICODE : PC_ASCII;
         pieces_default = true;
     }
 #ifndef _WIN32
@@ -6819,11 +8667,12 @@ static void console_enter_mode(Position* pos, bool greet) {
     record_clear();
     if (greet && con_prompt) console_word_logo();
     if (greet && con_prompt) {
-        char text[320];
-        snprintf(text, sizeof(text), "Chessenger %s console: play against Chessenger, analyze positions, annotate PGN games. "
-                 "Type 'help' to see everything you can do here, 'help <command>' for details (for example "
-                 "'help strength'); 'uci' switches to UCI mode.", ENGINE_VERSION);
-        print_wrapped(text, 0, NULL);
+
+        printf("Chessenger %s console\n", ENGINE_VERSION);
+        printf("Play against Chessenger, analyze positions, annotate PGN games.\n\n");
+        print_command("help", "everything you can do here");
+        print_command("help <command>", "details, for example 'help strength'");
+        print_command("uci", "switch to UCI mode");
         printf("\n");
     } else if (greet) printf("Chessenger %s console. Type 'help' for commands, 'uci' for UCI mode.\n", ENGINE_VERSION);
     fflush(stdout);
@@ -6900,6 +8749,7 @@ bool console_before_read(Position* pos, char* line, size_t size) {
         const SearchKind kind = search_kind;
         const bool interrupted = search_interrupted;
         bound_row_clear();
+        post_block_end();
         echo_off_end();
         search_kind = SK_NONE;
         search_interrupted = false;
@@ -6940,7 +8790,11 @@ bool console_before_read(Position* pos, char* line, size_t size) {
             continue;
         }
 
-        if (game_on && game_auto && !game_over && !have_queued) {
+        if (game_on && game_auto && !game_over && !have_queued && !eng_paused) {
+            if (auto_read) {
+                auto_read = false;
+                break;
+            }
             if (con_interrupt) {
                 con_interrupt = 0;
                 game_end("Autoplay stopped. The game is unfinished (*).");
@@ -7020,7 +8874,11 @@ ConsoleAction console_handle_line(Position* pos, char* line, size_t size) {
     const char* arg = split_word(line, word, sizeof(word), false);
     interrupt_count = 0;
     if (!word[0]) return CONSOLE_DONE;
-    if (con_prompt) putchar('\n');
+    const bool after_replay = replay_stopped;
+    replay_stopped = false;
+    static bool sentence_again = false;
+    if (con_prompt && !sentence_again) putchar('\n');
+    sentence_again = false;
     const int armed = leave_armed;
     leave_armed = -1;
     if (cont_have) {
@@ -7031,6 +8889,7 @@ ConsoleAction console_handle_line(Position* pos, char* line, size_t size) {
             snprintf(game_result, sizeof(game_result), "*");
             game_tc[game_human].none = true;
             game_tc_start = false;
+            screen_top();
             printf("The game goes on; you have no time limit now.\n");
             human_move_play(pos, &cont_move, true, 0);
             fflush(stdout);
@@ -7080,6 +8939,14 @@ ConsoleAction console_handle_line(Position* pos, char* line, size_t size) {
         print_two_part(first, "Type 'help' for a list of commands.");
         return CONSOLE_DONE;
     }
+    if (c && arg[0]) {
+        char as[MAX_UCI_LINE];
+        if (sentence_understand(line, word, c, as, sizeof(as))) {
+            snprintf(line, size, "%s", as);
+            sentence_again = true;
+            return console_handle_line(pos, line, size);
+        }
+    }
     if (c) {
         if (takes_no_argument(c->id) && extra_text(arg, alias ? alias : c->name, NULL)) {
             fflush(stdout);
@@ -7089,6 +8956,7 @@ ConsoleAction console_handle_line(Position* pos, char* line, size_t size) {
         if (c->id == C_PLAY || c->id == C_UCI || c->id == C_XBOARD || c->id == C_QUIT) analysis_on = false;
         if (c->id == C_AUTOPLAY || c->id == C_BENCH) analysis_on = false;
         if (c->id == C_NEW) analysis_on = false;
+        if (c->id == C_REPLAY) analysis_on = false;
         switch (c->id) {
             case C_NEW:
 
@@ -7108,10 +8976,12 @@ ConsoleAction console_handle_line(Position* pos, char* line, size_t size) {
             case C_SWITCH:   cmd_switch(pos); break;
             case C_HINT:     cmd_hint(pos, arg); break;
             case C_RESIGN:   cmd_resign(pos); break;
+            case C_END:      cmd_end(pos); break;
             case C_DRAW:     cmd_draw(pos, arg); break;
             case C_CLOCK:    cmd_clock(pos); break;
             case C_TIME:     cmd_time(pos, arg, alias); break;
             case C_POST:     cmd_post(arg); break;
+            case C_SCROLL:   cmd_scroll(arg); break;
             case C_SAVE:     cmd_save(pos, arg); break;
             case C_LOAD:     return cmd_load(pos, arg, line, size);
             case C_FIRST:
@@ -7119,10 +8989,14 @@ ConsoleAction console_handle_line(Position* pos, char* line, size_t size) {
             case C_NEXT:
             case C_LAST:
             case C_GOTO:     return cmd_nav(pos, c->id, arg, line, size);
-            case C_ANALYZE:  cmd_analyze(pos); break;
-            case C_STOP:     cmd_stop(); break;
+            case C_ANALYZE:  cmd_analyze(pos, arg); break;
+            case C_STOP:
+                if (after_replay && !arg[0]) break;
+                cmd_stop();
+                break;
+            case C_REPLAY:   cmd_replay(pos, arg); break;
             case C_GO:       cmd_go(pos, arg); break;
-            case C_EVAL:     cmd_eval(pos); break;
+            case C_EVAL:     cmd_eval(pos, arg); break;
             case C_MATE:     cmd_mate(pos, arg); break;
             case C_ANNOTATE: cmd_annotate(pos, arg, false); break;
             case C_WHY:      cmd_why(pos, arg); break;
@@ -7133,7 +9007,7 @@ ConsoleAction console_handle_line(Position* pos, char* line, size_t size) {
             case C_STRENGTH: cmd_strength(arg); message_gap(); break;
             case C_HISTORY:  cmd_history(pos); break;
             case C_BOARD:    cmd_board(pos, arg, alias ? alias : c->name); break;
-            case C_FEN:      history_check(pos); printf("%s\n", position_to_fen(pos)); break;
+            case C_FEN:      history_check(pos); printf("%s\n", position_to_fen(pos)); print_to_move(pos); break;
             case C_SETBOARD: return cmd_setboard(pos, arg, line, size);
             case C_MOVES:    cmd_moves(pos); break;
             case C_FLIP:
@@ -7146,9 +9020,9 @@ ConsoleAction console_handle_line(Position* pos, char* line, size_t size) {
             case C_SET:      return cmd_set(arg, line, size);
             case C_OPTIONS:  cmd_options(); break;
             case C_NETWORK:  cmd_network(); break;
-            case C_COLOR:    cmd_color(arg); break;
+            case C_COLOR:    cmd_color(pos, arg); break;
             case C_THEME:    cmd_theme(pos, arg); break;
-            case C_PIECES:   cmd_pieces(arg); break;
+            case C_PIECES:   cmd_pieces(pos, arg); break;
             case C_POV:      cmd_pov(arg); break;
             case C_WIDTH:    cmd_width(arg); break;
             case C_ABOUT:    print_banner(); break;
@@ -7185,6 +9059,14 @@ ConsoleAction console_handle_line(Position* pos, char* line, size_t size) {
         return CONSOLE_DONE;
     }
 
+    {
+        char as[MAX_UCI_LINE];
+        if (sentence_understand(line, word, NULL, as, sizeof(as))) {
+            snprintf(line, size, "%s", as);
+            sentence_again = true;
+            return console_handle_line(pos, line, size);
+        }
+    }
     if (game_on) game_human_move(pos, line);
     else cmd_typed_moves(pos, line);
     fflush(stdout);
@@ -7226,7 +9108,7 @@ int console_command_line(int argc, char** argv, Position* pos) {
                     own_push(OWN_POSITION);
                 }
             }
-            cmd_analyze(pos);
+            cmd_analyze(pos, "");
         } else {
             console_enter_mode(pos, false);
             if (!args[0]) {
@@ -7252,7 +9134,7 @@ int console_command_line(int argc, char** argv, Position* pos) {
 
 void console_enter_analyze(Position* pos) {
     console_enter_mode(pos, true);
-    cmd_analyze(pos);
+    cmd_analyze(pos, "");
     fflush(stdout);
 }
 

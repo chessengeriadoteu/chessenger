@@ -3,7 +3,7 @@
  * Copyright (C) Oliver Brausch (OliThink 5.10.5, MIT, see LICENSES/OLITHINK-MIT.txt)
  * Copyright (C) 2019-2025 Morgan Houppin (Stash 37)
  * Copyright (C) 2004-2026 The Stockfish developers (Stockfish 19, see the AUTHORS file of Stockfish)
- * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and Stockfish 19. Modified by Dariusz Domagała, 2026-11-01.
+ * Portions of this file are adapted from OliThink 5.10.5, Stash 37 and Stockfish 19. Modified by Dariusz Domagała, 2026-11-12.
  */
 #include "syzygy.h"
 #include "search.h"
@@ -39,6 +39,8 @@ typedef char history_capacity_check[(HISTORY_GAME_LIMIT + 1 + MAX_SEARCH_PLY + 1
 #define CHECK_SEE_MARGIN T_CHECK_SEE_MARGIN
 
 #  define FIRST_MOVE_DONE (first != NO_MOVE_YET)
+
+#define QSC_RECAP 5
 
 #define LMR_EXTEND_THRESHOLD T_LMR_EXTEND_THRESHOLD
 #define LMR_SKIP_RED_THRESHOLD T_LMR_SKIP_RED_THRESHOLD
@@ -163,6 +165,8 @@ static const int see_victim_value[7] = { 100, 500, 325, 325, 975, 0, 0 };
 #define CORR_BONUS_MOVE T_CORR_BONUS_MOVE
 #define CORR_BONUS_NO_MOVE T_CORR_BONUS_NO_MOVE
 
+#define P1085_TT_50 96
+
 #  define LAZY_SEE()(see_ready ? see : (see_ready = 1, see = static_exchange_evaluation(pos, &m)))
 
 static const int see_gain_value[7] = { 100, 500, 325, 325, 975, 10000, 0 };
@@ -189,10 +193,13 @@ typedef struct {
     Move counter_at_ply[MAX_SEARCH_PLY + 2];
     int  nmp_verify_ply;
     int  root_depth;
+    int  qs_entry_ply;
+    int  qs_last_to_sq[MAX_SEARCH_PLY + 2];
     int  reduced_child_at_ply[MAX_SEARCH_PLY + 2];
     int  parent_lmr_reduction[MAX_SEARCH_PLY + 2];
     int  raw_eval_at_ply[MAX_SEARCH_PLY + 2];
     NnueThread* nnue_thread;
+    int  rep_root;
 } SearchThreadState;
 
 static SMP_TLS SearchThreadState thread_state;
@@ -232,6 +239,8 @@ static SMP_TLS SearchThreadState thread_state;
 #define raw_eval_at_ply       (thread_state.raw_eval_at_ply)
 #define pawn_history        (thread_state.pawn_history)
 #define low_ply_history        (thread_state.low_ply_history)
+#define rep_root       (thread_state.rep_root)
+#define rep_lb      (thread_state.rep_lb)
 
 static inline uint64_t key_after_move(const Position* pos, const Move* m) {
     const int us = pos->to_move, them = 1 - us;
@@ -364,6 +373,20 @@ static Move* counter_slot(int ply, Color us) {
 #  undef IS_KILLER_OR_COUNTER
 #    define IS_KILLER_OR_COUNTER(m, ply) (same_move((m), killer_table[(ply)]) || same_move((m), counter_at_ply[(ply)]))
 
+static inline int rep_seen(const Position* pos, uint64_t h, int to_sq) {
+    int k;
+    for (k = pos->history_base; k < to_sq; k++) if (pos->position_history[k] == h) return 1;
+    return 0;
+}
+
+static inline int rep_draw(const Position* pos) {
+    const uint64_t h = pos->hash;
+    int k;
+    for (k = pos->history_count - 1; k >= (pos->history_base); k--)
+        if (pos->position_history[k] == h) return k > rep_root || rep_seen(pos, h, k);
+    return 0;
+}
+
 static uint64_t       cuckoo_key[0x2000];
 static unsigned short cuckoo_move[0x2000];
 static int            cuckoo_ready = 0;
@@ -421,7 +444,9 @@ static int has_upcoming_cycle(Position* pos, int ply) {
             if (s != b) continue;
         }
         if (ply > i) return 1;
-        if ((pos->occupied[pos->to_move] >> (((pos->all_pieces >> a) & 1) ? a : b)) & 1) return 1;
+
+        if (((pos->occupied[pos->to_move] >> (((pos->all_pieces >> a) & 1) ? a : b)) & 1)
+                && rep_seen(pos, pos->position_history[pos->history_count - i], pos->history_count - i)) return 1;
     }
     return 0;
 }
@@ -627,6 +652,9 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
     LegalityBuffer qs_legal_ctx; int qs_legal_ready = 0;
     Color us = pos->to_move;
     int  qs_base_score = 0, qs_have_base = 0;
+    const int qsc_ply = ply - qs_entry_ply;
+    int  qsc_sp = 0;
+    int  p1079_qn = 0;
 
     if (info->seldepth < ply) info->seldepth = ply;
     if (fast_check_stop()) return alpha;
@@ -670,10 +698,6 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
             if (beta_filter_val >= beta) return beta;
             beta_filter_done = 1;
         }
-        if (mat_balance_stm + QS_DELTA_ALPHA <= alpha && !is_endgame_special(pos)) {
-            qg_br = 1;
-            break;
-        }
         if (beta_filter_done) {
             if (eval_is_fresh) tt_store_eval(&main_tt, pos->hash, raw_eval_for_tt);
         } else {
@@ -687,6 +711,7 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
         { CorrSlots qk; best = corr_clamp(best + corr_compute(pos, ply, pos->to_move, &qk)); }
         }
         qs_base_score = best; qs_have_base = 1;
+        qsc_sp = 1;
 
         if (q_tt_found && qts.result_bb && (qts.flag == HASH_EXACT
                                     || (qts.score > best ? qts.flag == HASH_BETA : qts.flag == HASH_ALPHA)))
@@ -706,6 +731,11 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
         int      w;
 
         if (ch && best > -TB_WIN_ZONE && m.captured == EMPTY && m.promotion == EMPTY) continue;
+
+        if (!ch && p1079_qn >= 2 && best > -TB_WIN_ZONE && m.promotion == EMPTY
+                && (!ply || m.to != move_stack[ply - 1].to) && !gives_check(pos, &m)) continue;
+
+        if (!ch && qsc_ply >= QSC_RECAP && m.to != qs_last_to_sq[ply - 1]) continue;
 
         if (!ch && m.promotion == EMPTY) {
             const int qf = qs_have_base && qs_base_score + QS_FUT_MARGIN <= alpha;
@@ -729,7 +759,9 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
         PREFETCH_AFTER_MOVE();
         info->nodes++;
         (*node_counter_ptr)++;
+        p1079_qn++;
 
+        qs_last_to_sq[ply] = m.to;
         move_stack[ply] = m; null_at_ply[ply] = 0;
         w = -qsearch(pos, is_in_check(pos, pos->to_move), ply + 1, -beta, -alpha, info);
 
@@ -741,6 +773,40 @@ static int qsearch(Position* pos, bool ch, int ply, int alpha, int beta, SearchI
             if ((best = w) > alpha) {
                 if ((alpha = w) >= beta) {
 
+                    qs_tt_store(pos, w, HASH_BETA, ply);
+                    return w;
+                }
+            }
+        }
+    }
+
+    if (!ch && qsc_ply == 0 && qsc_sp) {
+        const Color    qsc_us = pos->to_move;
+        const Bitboard qsc_king_bb = pos->pieces[qsc_us == WHITE ? BLACK : WHITE][KING];
+        if (qsc_king_bb) {
+            const int      ksq = get_lsb(qsc_king_bb);
+            const Bitboard king_diag  = magic_bishop_attacks(ksq, pos->all_pieces);
+            const Bitboard king_orth  = magic_rook_attacks(ksq, pos->all_pieces);
+            n = generate_moves(pos, mlist);
+            for (i = 0; i < n; i++) {
+                Move     m = mlist[i];
+                UndoInfo u;
+                int      w;
+                if (m.captured != EMPTY || m.promotion != EMPTY || m.is_castling || m.is_en_passant) continue;
+                if (!qs_may_give_check(&m, ksq, king_diag, king_orth)) continue;
+                if (static_exchange_evaluation(pos, &m) < 0) continue;
+                make_move_full(pos, &m, &u);
+                if (is_in_check(pos, qsc_us) || !is_in_check(pos, pos->to_move)) { undo_move_full(pos, &m, &u); continue; }
+                nnue_after_move(nnue_thread, ply + 1, pos);
+                TT_PF(pos->hash);
+                info->nodes++;
+                (*node_counter_ptr)++;
+                qs_last_to_sq[ply] = m.to;
+                move_stack[ply] = m; null_at_ply[ply] = 0;
+                w = -qsearch(pos, true, ply + 1, -beta, -alpha, info);
+                undo_move_full(pos, &m, &u);
+                if (S2_STOP) return alpha;
+                if (w > best && (best = w) > alpha && (alpha = w) >= beta) {
                     qs_tt_store(pos, w, HASH_BETA, ply);
                     return w;
                 }
@@ -849,14 +915,14 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
         return alpha;
     }
 
-    if (ply && (count_position_occurrences_max2(pos, pos->hash) >= 2
+    if (ply && (rep_draw(pos)
              || pos->halfmove_clock >= 100
              || has_insufficient_material(pos))) {
         return 1 - (int)(info->nodes & 2);
     }
 
     if (ply && alpha < 0 && pos->halfmove_clock >= 3 && has_upcoming_cycle(pos, ply)) {
-        alpha = 0;
+        alpha = 0 + 0;
         if (alpha >= beta) return beta;
     }
 
@@ -865,7 +931,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
     stat_score_at_ply[ply] = 0;
     move_count_at_ply[ply]  = 0;
 
-    if (d <= 0) return qsearch(pos, ch, ply, alpha, beta, info);
+    if (d <= 0) { (qs_entry_ply = ply); return qsearch(pos, ch, ply, alpha, beta, info); }
 
     if (alpha < -MATE_SCORE + ply)     alpha = -MATE_SCORE + ply;
     if (beta  >  MATE_SCORE - ply - 1) beta  =  MATE_SCORE - ply - 1;
@@ -877,7 +943,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
     tt_hit   = tt_so.result_bb;
     if (tt_hit) { tt_d = tt_so.depth; tt_flag = tt_so.flag; tt_s = tt_so.score; }
 
-    if (tt_hit && !excl && ply > 0 && tt_d >= d) {
+    if (tt_hit && !excl && ply > 0 && tt_d >= d && (!(3 & 1) || !pvnode) && (!(3 & 2) || pos->halfmove_clock < P1085_TT_50)) {
 
         if ((tt_flag == HASH_BETA  || tt_flag == HASH_EXACT) && tt_s >= beta) return tt_s;
         if ((tt_flag == HASH_ALPHA || tt_flag == HASH_EXACT) && tt_s <= alpha) return tt_s;
@@ -938,9 +1004,9 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
 
     if (!ch && !pvnode && beta > -MATE_SCORE + 500) {
 
-        if (d == 1 && eval_raw + RAZOR_MARGIN_CORE <= alpha) return qsearch(pos, false, ply, alpha, beta, info);
+        if (d == 1 && eval_raw + RAZOR_MARGIN_CORE <= alpha) { (qs_entry_ply = ply); return qsearch(pos, false, ply, alpha, beta, info); }
 
-        if (d <= RFP_D && eval_adj - RFP_MULT * d > beta)
+        if ((!(3 & 1) || !excl) && d <= RFP_D && eval_adj - RFP_MULT * d > beta)
             return eval_adj < TB_WIN_ZONE ? eval_adj - RFP_MULT * d : beta;
     }
 
@@ -1019,7 +1085,7 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
         }
     }
 
-    if (d >= 3 && is_no_move(tt_pv_move)) d--;
+    if ((!(3 & 2) || !excl) && d >= 3 && is_no_move(tt_pv_move)) d--;
 
     LegalityBuffer legal_buf;
     improving_flag = !ch && ply >= 2 && eval_adj >= eval_stack_ply[ply - 2];
@@ -1091,11 +1157,13 @@ static int search_node(Position* pos, bool ch, int d, int ply, int alpha, int be
                                 se = 3;
                         }
                     }
-                } else if (sb >= beta) {
+                } else if (sv >= beta && sv < TB_WIN_ZONE && sv > -TB_WIN_ZONE) {
                     if (S2_STOP) return alpha;
                     return sv < MATE_SCORE - 500 ? sv : beta;
                 } else if (tt_s >= beta)
                     se = (beta < MATE_SCORE - 500 && beta > -MATE_SCORE + 500) ? -2 : -1;
+                else if (cut)
+                    se = -1;
                 nd += se;
             }
         } else if (n == STAGE_CAPTURES) {
@@ -1458,6 +1526,7 @@ Move search_root(Position* pos, int depth, int alpha, int beta, SearchInfo* info
     root_depth = depth;
     nmp_verify_ply = 0;
     ch = is_in_check(pos, pos->to_move);
+    rep_root = pos->history_count;
     info->score = search_node(pos, ch, depth, 0, alpha, beta, 0, NULL, info CUTNODE_PASS(0));
 
     pv_to_string(pos, pv_str, sizeof(pv_str));

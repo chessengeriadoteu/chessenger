@@ -10,7 +10,8 @@
 
 typedef enum {
     XBOARD_DONE = 0,
-    XBOARD_QUIT
+    XBOARD_QUIT,
+    XBOARD_PASS
 } XboardAction;
 
 bool xboard_active(void);
